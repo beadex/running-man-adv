@@ -92,12 +92,40 @@ impl Cpu {
 
         let kind = arm::classify(instruction);
 
-        println!(
-            "ARM PC=0x{pc:08X} \
-         instruction=0x{instruction:08X} \
-         condition={condition:?} \
-         kind={kind:?}"
-        );
+        match kind {
+            arm::ArmInstructionKind::DataProcessing => {
+                let decoded = arm::decode_data_processing(instruction)
+                    .map_err(|error| {
+                        panic!(
+                            "failed to decode ARM instruction \
+                         0x{instruction:08X}: {error:?}"
+                        )
+                    })
+                    .unwrap();
+
+                match arm::execute_data_processing(&mut self.registers, decoded) {
+                    Ok(()) => {}
+
+                    Err(error) => {
+                        println!(
+                            "ARM data-processing execution not supported: \
+                     PC=0x{pc:08X} \
+                     instruction=0x{instruction:08X} \
+                     error={error:?}"
+                        );
+                    }
+                }
+            }
+
+            _ => {
+                println!(
+                    "ARM PC=0x{pc:08X} \
+                 instruction=0x{instruction:08X} \
+                 condition={condition:?} \
+                 kind={kind:?}"
+                );
+            }
+        }
 
         // Execution will be added later.
         1
