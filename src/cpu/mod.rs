@@ -60,10 +60,10 @@ impl Cpu {
     }
 
     fn step_arm(&mut self, bus: &mut Bus) -> u32 {
-        let pc = self.registers.pc();
-        let instruction = bus.read32(pc);
+        let instruction_address = self.registers.pc();
+        let raw_instruction = bus.read32(instruction_address);
 
-        let condition = arm::condition(instruction);
+        let condition = arm::condition(raw_instruction);
         let condition_passed = condition.evaluate(self.registers.cpsr());
 
         /*
@@ -72,12 +72,12 @@ impl Cpu {
          * Later, once the ARM pipeline is implemented, the visible PC and
          * instruction address will need to be modelled separately.
          */
-        self.registers.set_pc(pc.wrapping_add(4));
+        self.registers.set_pc(instruction_address.wrapping_add(4));
 
         if !condition_passed {
             println!(
-                "ARM PC=0x{pc:08X} \
-             instruction=0x{instruction:08X} \
+                "ARM PC=0x{instruction_address:08X} \
+             instruction=0x{raw_instruction:08X} \
              condition={condition:?} skipped"
             );
 
@@ -90,44 +90,42 @@ impl Cpu {
             return 1;
         }
 
-        let kind = arm::classify(instruction);
+        let instruction = match arm::decode_arm(raw_instruction) {
+            Ok(instruction) => instruction,
 
-        match kind {
-            arm::ArmInstructionKind::DataProcessing => {
-                let decoded = arm::decode_data_processing(instruction)
-                    .map_err(|error| {
-                        panic!(
-                            "failed to decode ARM instruction \
-                         0x{instruction:08X}: {error:?}"
-                        )
-                    })
-                    .unwrap();
+            Err(error) => {
+                println!(
+                    "ARM decode error: \
+                 PC=0x{instruction_address:08X} \
+                 instruction=0x{raw_instruction:08X} \
+                 error={error:?}"
+                );
 
-                match arm::execute_data_processing(&mut self.registers, decoded) {
-                    Ok(()) => {}
+                return 1;
+            }
+        };
 
-                    Err(error) => {
-                        println!(
-                            "ARM data-processing execution not supported: \
-                     PC=0x{pc:08X} \
-                     instruction=0x{instruction:08X} \
-                     error={error:?}"
-                        );
-                    }
-                }
+        match arm::execute_arm(&mut self.registers, &instruction, instruction_address) {
+            Ok(()) => {}
+
+            Err(arm::ArmExecutionError::UnimplementedInstruction) => {
+                println!(
+                    "ARM instruction not implemented: \
+             PC=0x{instruction_address:08X} \
+             instruction={instruction:?}"
+                );
             }
 
-            _ => {
+            Err(error) => {
                 println!(
-                    "ARM PC=0x{pc:08X} \
-                 instruction=0x{instruction:08X} \
-                 condition={condition:?} \
-                 kind={kind:?}"
+                    "ARM execution error: \
+             PC=0x{instruction_address:08X} \
+             instruction={instruction:?} \
+             error={error:?}"
                 );
             }
         }
 
-        // Execution will be added later.
         1
     }
 
@@ -153,6 +151,7 @@ impl Default for Cpu {
 #[cfg(test)]
 mod tests {
     use super::Cpu;
+    use super::Registers;
     use crate::bus::Bus;
 
     #[test]
@@ -169,45 +168,134 @@ mod tests {
     }
 
     #[test]
-    fn arm_instruction_is_skipped_when_condition_fails() {
+    fn failed_conditional_branch_is_not_taken() {
         let mut cpu = Cpu::new();
         let mut bus = Bus::new();
 
         /*
-         * ADDEQ R0, R1, R2
+         * BEQ +0
          *
-         * EQ requires Z == 1.
+         * Z is clear, so branch is not taken.
          */
-        bus.write32(0x0200_0000, 0x0081_0002);
+        bus.write32(0x0200_0000, 0x0A00_0000);
 
         cpu.registers_mut().set_pc(0x0200_0000);
+
         cpu.registers_mut().cpsr_mut().set_zero(false);
 
-        let cycles = cpu.step(&mut bus);
+        cpu.step(&mut bus);
 
-        assert_eq!(cycles, 1);
         assert_eq!(cpu.registers().pc(), 0x0200_0004);
-
-        /*
-         * Execution is not implemented yet, but once it is, this test
-         * should additionally assert that R0 remains unchanged.
-         */
     }
 
     #[test]
-    fn arm_instruction_is_classified_when_condition_passes() {
+    fn passed_conditional_branch_is_taken() {
         let mut cpu = Cpu::new();
         let mut bus = Bus::new();
 
-        // ADDEQ R0, R1, R2
-        bus.write32(0x0200_0000, 0x0081_0002);
+        // BEQ +0
+        bus.write32(0x0200_0000, 0x0A00_0000);
 
         cpu.registers_mut().set_pc(0x0200_0000);
+
         cpu.registers_mut().cpsr_mut().set_zero(true);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_0008);
+    }
+
+    #[test]
+    fn branch_negative_eight_branches_to_itself() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * B .
+         *
+         * Target = current PC.
+         *
+         * Architectural branch base is current + 8, so the encoded
+         * displacement must be -8.
+         *
+         * imm24 = -2 = 0xFFFFFE.
+         */
+        bus.write32(0x0200_0000, 0xEAFF_FFFE);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_0000);
+    }
+
+    #[test]
+    fn cpu_executes_arm_mov_immediate() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * MOV R0, #42
+         */
+        bus.write32(0x0200_0000, 0xE3A0_002A);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
 
         let cycles = cpu.step(&mut bus);
 
         assert_eq!(cycles, 1);
+        assert_eq!(cpu.registers().read(0), 42);
         assert_eq!(cpu.registers().pc(), 0x0200_0004);
+    }
+
+    #[test]
+    fn cpu_executes_arm_branch() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * At 0x02000000:
+         *
+         * B +0
+         *
+         * Target:
+         * current address + 8 + 0
+         * = 0x02000008
+         */
+        bus.write32(0x0200_0000, 0xEA00_0000);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_0008);
+    }
+
+    #[test]
+    fn cpu_executes_arm_branch_with_link() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * BL +4:
+         *
+         * imm24 = 1
+         * displacement = 4
+         *
+         * target = current + 8 + 4
+         *        = 0x0200000C
+         *
+         * LR = current + 4
+         *    = 0x02000004
+         */
+        bus.write32(0x0200_0000, 0xEB00_0001);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_000C);
+
+        assert_eq!(cpu.registers().read(Registers::LR), 0x0200_0004);
     }
 }
