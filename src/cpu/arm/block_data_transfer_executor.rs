@@ -1,4 +1,7 @@
-use crate::{bus::Bus, cpu::ExceptionError, cpu::Registers, cpu::return_from_exception};
+use crate::{
+    bus::{AccessKind, Bus},
+    cpu::{ExceptionError, Registers, return_from_exception},
+};
 
 use super::{BlockAddressingMode, BlockDataTransferInstruction};
 
@@ -8,6 +11,12 @@ pub struct BlockDataTransferExecutionResult {
     pub final_address: u32,
     pub written_back_value: Option<u32>,
     pub register_count: u32,
+
+    /*
+     * Sum of all memory-access cycles.
+     */
+    pub cycles: u32,
+
     pub branch: bool,
 }
 
@@ -75,24 +84,45 @@ pub fn execute_block_data_transfer(
 
     let mut loaded_pc = None;
 
+    let mut memory_cycles = 0u32;
+
+    let mut transfer_index = 0u32;
+
     for register in 0u8..16 {
         if !instruction.registers.contains(register) {
             continue;
         }
 
+        /*
+         * First bus transfer starts a new memory sequence.
+         * Following transfers are sequential.
+         */
+        let access_kind = if transfer_index == 0 {
+            AccessKind::NonSequential
+        } else {
+            AccessKind::Sequential
+        };
+
         if instruction.load {
-            let value = bus.read32(address);
+            let access = bus.read32_timed(address, access_kind);
+
+            memory_cycles = memory_cycles.saturating_add(access.cycles);
 
             if register as usize == Registers::PC {
-                loaded_pc = Some(value);
+                loaded_pc = Some(access.value);
             } else {
-                registers.write(register as usize, value);
+                registers.write(register as usize, access.value);
             }
         } else {
-            bus.write32(address, store_values[register as usize]);
+            let access_cycles =
+                bus.write32_timed(address, store_values[register as usize], access_kind);
+
+            memory_cycles = memory_cycles.saturating_add(access_cycles);
         }
 
         address = address.wrapping_add(4);
+
+        transfer_index += 1;
     }
 
     if instruction.write_back {
@@ -117,9 +147,13 @@ pub fn execute_block_data_transfer(
 
     Ok(BlockDataTransferExecutionResult {
         first_address,
+
         final_address: address.wrapping_sub(4),
+
         written_back_value: instruction.write_back.then_some(write_back_value),
+
         register_count,
+        cycles: memory_cycles,
         branch,
     })
 }
@@ -418,5 +452,46 @@ mod tests {
             result,
             Err(BlockDataTransferExecutionError::WriteBackBaseInRegisterList)
         );
+    }
+
+    #[test]
+    fn block_transfer_reports_accumulated_cycles() {
+        let mut registers = Registers::new();
+
+        let mut bus = Bus::new();
+
+        registers.write(0, 0x0800_0000);
+
+        let mut rom = vec![0u8; 12];
+
+        rom[0..4].copy_from_slice(&1u32.to_le_bytes());
+
+        rom[4..8].copy_from_slice(&2u32.to_le_bytes());
+
+        rom[8..12].copy_from_slice(&3u32.to_le_bytes());
+
+        bus.load_rom(&rom).unwrap();
+
+        /*
+         * LDMIA R0, {R1-R3}
+         */
+        let instruction = decode_block_data_transfer(0xE890_000E).unwrap();
+
+        let result =
+            execute_block_data_transfer(&mut registers, &mut bus, instruction, 0x0200_0000)
+                .unwrap();
+
+        /*
+         * Default WS0:
+         *
+         * first 32-bit read: N + S = 4 + 2 = 6
+         * second read:      S + S = 2 + 2 = 4
+         * third read:       S + S = 2 + 2 = 4
+         */
+        assert_eq!(result.cycles, 14);
+
+        assert_eq!(registers.read(1), 1);
+        assert_eq!(registers.read(2), 2);
+        assert_eq!(registers.read(3), 3);
     }
 }

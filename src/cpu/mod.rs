@@ -5,6 +5,7 @@ mod exception_handler;
 mod mode;
 mod registers;
 
+use crate::bus::AccessKind;
 use crate::bus::Bus;
 
 pub use self::cpsr::Cpsr;
@@ -26,6 +27,14 @@ pub enum CpuState {
 pub struct Cpu {
     registers: Registers,
     halted: bool,
+
+    /*
+     * True when the next instruction fetch continues the current
+     * linear instruction stream.
+     *
+     * Branch, exception and PC writes reset this to false.
+     */
+    next_fetch_sequential: bool,
 }
 
 impl Cpu {
@@ -33,6 +42,7 @@ impl Cpu {
         Self {
             registers: Registers::new(),
             halted: false,
+            next_fetch_sequential: false,
         }
     }
 
@@ -41,6 +51,7 @@ impl Cpu {
         self.registers.set_pc(0);
         self.registers.cpsr_mut().set_thumb_state(false);
         self.halted = false;
+        self.next_fetch_sequential = false;
     }
 
     pub const fn is_halted(&self) -> bool {
@@ -81,7 +92,36 @@ impl Cpu {
         enter_exception(&mut self.registers, Exception::Irq, return_address)
             .expect("IRQ mode must provide an SPSR");
 
+        /*
+         * IRQ changes PC to the exception vector. The next fetch starts a
+         * new memory sequence.
+         */
+        self.break_fetch_sequence();
+
+        /*
+         * Exception entry timing is still preliminary.
+         */
         Some(1)
+    }
+
+    fn take_fetch_kind(&mut self) -> AccessKind {
+        let kind = if self.next_fetch_sequential {
+            AccessKind::Sequential
+        } else {
+            AccessKind::NonSequential
+        };
+
+        /*
+         * Unless instruction execution changes PC, the following fetch
+         * continues linearly.
+         */
+        self.next_fetch_sequential = true;
+
+        kind
+    }
+
+    pub fn break_fetch_sequence(&mut self) {
+        self.next_fetch_sequential = false;
     }
 
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
@@ -134,33 +174,30 @@ impl Cpu {
 
     fn step_arm(&mut self, bus: &mut Bus) -> u32 {
         let instruction_address = self.registers.pc();
-        let raw_instruction = bus.read32(instruction_address);
+
+        let fetch_kind = self.take_fetch_kind();
+
+        let fetch = bus.read32_timed(instruction_address, fetch_kind);
+
+        let raw_instruction = fetch.value;
 
         let condition = arm::condition(raw_instruction);
+
         let condition_passed = condition.evaluate(self.registers.cpsr());
 
         /*
-         * Temporary sequential PC model.
+         * Temporary no-pipeline PC model.
          *
-         * Later, once the ARM pipeline is implemented, the visible PC and
-         * instruction address will need to be modelled separately.
+         * Before execution, PC points to the next sequential instruction.
          */
         self.registers.set_pc(instruction_address.wrapping_add(4));
 
         if !condition_passed {
-            println!(
-                "ARM PC=0x{instruction_address:08X} \
-             instruction=0x{raw_instruction:08X} \
-             condition={condition:?} skipped"
-            );
-
             /*
-             * Temporary cycle count.
-             *
-             * A failed condition does not execute the instruction, but
-             * timing will eventually depend on pipeline and bus behaviour.
+             * Condition-failed instructions still consume their fetch.
+             * No instruction-specific work is performed.
              */
-            return 1;
+            return fetch.cycles;
         }
 
         let instruction = match arm::decode_arm(raw_instruction) {
@@ -169,49 +206,72 @@ impl Cpu {
             Err(error) => {
                 println!(
                     "ARM decode error: \
-                 PC=0x{instruction_address:08X} \
-                 instruction=0x{raw_instruction:08X} \
-                 error={error:?}"
+                     PC=0x{instruction_address:08X} \
+                     instruction=0x{raw_instruction:08X} \
+                     error={error:?}"
                 );
 
-                return 1;
+                /*
+                 * The fetch already happened. Do not replace its timing
+                 * with the old constant one-cycle result.
+                 */
+                return fetch.cycles;
             }
         };
 
-        match arm::execute_arm(&mut self.registers, bus, &instruction, instruction_address) {
-            Ok(()) => {}
+        let execution =
+            match arm::execute_arm(&mut self.registers, bus, &instruction, instruction_address) {
+                Ok(result) => result,
 
-            Err(arm::ArmExecutionError::UnimplementedInstruction) => {
-                println!(
-                    "ARM instruction not implemented: \
-             PC=0x{instruction_address:08X} \
-             instruction={instruction:?}"
-                );
-            }
+                Err(arm::ArmExecutionError::UnimplementedInstruction) => {
+                    println!(
+                        "ARM instruction not implemented: \
+                     PC=0x{instruction_address:08X} \
+                     instruction={instruction:?}"
+                    );
 
-            Err(error) => {
-                println!(
-                    "ARM execution error: \
-             PC=0x{instruction_address:08X} \
-             instruction={instruction:?} \
-             error={error:?}"
-                );
-            }
+                    arm::ArmExecutionResult::sequential(1)
+                }
+
+                Err(error) => {
+                    println!(
+                        "ARM execution error: \
+                     PC=0x{instruction_address:08X} \
+                     instruction={instruction:?} \
+                     error={error:?}"
+                    );
+
+                    arm::ArmExecutionResult::sequential(1)
+                }
+            };
+
+        if execution.branch {
+            self.break_fetch_sequence();
         }
 
-        1
+        fetch.cycles.saturating_add(execution.cycles)
     }
 
     fn step_thumb(&mut self, bus: &mut Bus) -> u32 {
-        let pc = self.registers.pc();
-        let instruction = bus.read16(pc);
+        let instruction_address = self.registers.pc();
 
-        println!("THUMB PC=0x{pc:08X} instruction=0x{instruction:04X}");
+        let fetch_kind = self.take_fetch_kind();
 
-        self.registers.set_pc(pc.wrapping_add(2));
+        let fetch = bus.read16_timed(instruction_address, fetch_kind);
 
-        // Temporary cycle count.
-        1
+        println!(
+            "THUMB PC=0x{instruction_address:08X} \
+         instruction=0x{:04X}",
+            fetch.value,
+        );
+
+        self.registers.set_pc(instruction_address.wrapping_add(2));
+
+        /*
+         * THUMB execution has not been integrated yet, so this step only
+         * reports instruction-fetch timing.
+         */
+        fetch.cycles
     }
 }
 
@@ -340,7 +400,7 @@ mod tests {
 
         let cycles = cpu.step(&mut bus);
 
-        assert_eq!(cycles, 1);
+        assert!(cycles >= 6, "EWRAM ARM fetch alone must cost six cycles",);
         assert_eq!(cpu.registers().read(0), 42);
         assert_eq!(cpu.registers().pc(), 0x0200_0004);
     }
@@ -1057,5 +1117,82 @@ mod tests {
         bus.tick(100);
 
         assert_eq!(bus.read16(Bus::REG_TM1CNT_L), 100);
+    }
+
+    #[test]
+    fn linear_rom_fetch_uses_sequential_timing_after_first_instruction() {
+        let mut cpu = Cpu::new();
+
+        let mut bus = Bus::new();
+
+        let mut rom = vec![0u8; 8];
+
+        rom[0..4].copy_from_slice(&0xE1A0_0000u32.to_le_bytes());
+
+        rom[4..8].copy_from_slice(&0xE1A0_0000u32.to_le_bytes());
+
+        bus.load_rom(&rom).unwrap();
+
+        cpu.registers_mut().set_pc(0x0800_0000);
+
+        let first = cpu.step(&mut bus);
+
+        let second = cpu.step(&mut bus);
+
+        /*
+         * Default WS0:
+         *
+         * First ARM word fetch:
+         * N + S = 4 + 2 = 6
+         *
+         * Sequential ARM word fetch:
+         * S + S = 2 + 2 = 4
+         *
+         * Both execute the same MOV instruction, so the second step must
+         * be two cycles cheaper.
+         */
+        assert_eq!(first.saturating_sub(second), 2,);
+    }
+
+    #[test]
+    fn branch_breaks_instruction_fetch_sequence() {
+        let mut cpu = Cpu::new();
+
+        let mut bus = Bus::new();
+
+        let mut rom = vec![0u8; 16];
+
+        /*
+         * 0x08000000: NOP
+         */
+        rom[0..4].copy_from_slice(&0xE1A0_0000u32.to_le_bytes());
+
+        /*
+         * 0x08000004: B +0
+         * target = 0x0800000C
+         */
+        rom[4..8].copy_from_slice(&0xEA00_0000u32.to_le_bytes());
+
+        /*
+         * 0x0800000C: NOP
+         */
+        rom[12..16].copy_from_slice(&0xE1A0_0000u32.to_le_bytes());
+
+        bus.load_rom(&rom).unwrap();
+
+        cpu.registers_mut().set_pc(0x0800_0000);
+
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+
+        /*
+         * Fetch at branch target must be non-sequential.
+         */
+        let target_cycles = cpu.step(&mut bus);
+
+        /*
+         * WS0 non-sequential word fetch costs at least 6 cycles.
+         */
+        assert!(target_cycles >= 6);
     }
 }

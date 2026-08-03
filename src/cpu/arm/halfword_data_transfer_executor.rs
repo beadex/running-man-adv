@@ -1,4 +1,7 @@
-use crate::{bus::Bus, cpu::Registers};
+use crate::{
+    bus::{AccessKind, Bus},
+    cpu::Registers,
+};
 
 use super::{HalfwordDataTransferInstruction, HalfwordTransferKind, HalfwordTransferOffset};
 
@@ -7,6 +10,12 @@ pub struct HalfwordDataTransferExecutionResult {
     pub address: u32,
     pub loaded_value: Option<u32>,
     pub written_back_value: Option<u32>,
+
+    /*
+     * Data-access cycles only.
+     */
+    pub cycles: u32,
+
     pub branch: bool,
 }
 
@@ -72,38 +81,49 @@ pub fn execute_halfword_data_transfer(
     let mut loaded_value = None;
     let mut branch = false;
 
-    match instruction.kind {
-        HalfwordTransferKind::StoreHalfword => {
-            bus.write16(
-                transfer_address,
-                store_value.expect("STRH source must exist") as u16,
-            );
-        }
+    let memory_cycles = match instruction.kind {
+        HalfwordTransferKind::StoreHalfword => bus.write16_timed(
+            transfer_address,
+            store_value.expect("STRH source must exist") as u16,
+            AccessKind::NonSequential,
+        ),
 
         HalfwordTransferKind::LoadHalfword => {
-            let value = bus.read16(transfer_address) as u32;
+            let access = bus.read16_timed(transfer_address, AccessKind::NonSequential);
+
+            let value = access.value as u32;
 
             loaded_value = Some(value);
 
             write_loaded_value(registers, instruction.rd, value, &mut branch);
+
+            access.cycles
         }
 
         HalfwordTransferKind::LoadSignedByte => {
-            let value = (bus.read8(transfer_address) as i8) as i32 as u32;
+            let access = bus.read8_timed(transfer_address, AccessKind::NonSequential);
+
+            let value = (access.value as i8) as i32 as u32;
 
             loaded_value = Some(value);
 
             write_loaded_value(registers, instruction.rd, value, &mut branch);
+
+            access.cycles
         }
 
         HalfwordTransferKind::LoadSignedHalfword => {
-            let value = (bus.read16(transfer_address) as i16) as i32 as u32;
+            let access = bus.read16_timed(transfer_address, AccessKind::NonSequential);
+
+            let value = (access.value as i16) as i32 as u32;
 
             loaded_value = Some(value);
 
             write_loaded_value(registers, instruction.rd, value, &mut branch);
+
+            access.cycles
         }
-    }
+    };
 
     let written_back_value = if instruction.write_back {
         registers.write(instruction.rn as usize, modified_base);
@@ -117,6 +137,7 @@ pub fn execute_halfword_data_transfer(
         address: transfer_address,
         loaded_value,
         written_back_value,
+        cycles: memory_cycles,
         branch,
     })
 }
@@ -316,5 +337,25 @@ mod tests {
         execute(&mut registers, &mut bus, 0xE1C0_F0B0);
 
         assert_eq!(bus.read16(0x0200_0100), 0x000C);
+    }
+
+    #[test]
+    fn ldrh_from_ewram_reports_memory_cycles() {
+        let mut registers = Registers::new();
+
+        let mut bus = Bus::new();
+
+        registers.write(0, 0x0200_0100);
+
+        bus.write16(0x0200_0100, 0xCAFE);
+
+        let instruction = decode_halfword_data_transfer(0xE1D0_10B0).unwrap();
+
+        let result =
+            execute_halfword_data_transfer(&mut registers, &mut bus, instruction, 0x0800_0000)
+                .unwrap();
+
+        assert_eq!(result.cycles, 3);
+        assert_eq!(registers.read(1), 0xCAFE);
     }
 }

@@ -1,6 +1,7 @@
 use super::{
     DmaChannelIndex, DmaController, DmaStartTiming, InterruptController, InterruptSource, Key,
     Keypad, KeypadUpdateResult, PowerControl, PowerStateRequest, Ppu, TimerController, TimerIndex,
+    WaitControl,
 };
 
 #[derive(Debug, Clone)]
@@ -12,6 +13,7 @@ pub struct IoRegisters {
     ppu: Ppu,
     keypad: Keypad,
     power: PowerControl,
+    wait_control: WaitControl,
 }
 
 impl IoRegisters {
@@ -63,6 +65,8 @@ impl IoRegisters {
     pub const POSTFLG_OFFSET: u32 = 0x0300;
     pub const HALTCNT_OFFSET: u32 = 0x0301;
 
+    pub const WAITCNT_OFFSET: u32 = 0x0204;
+
     pub fn new() -> Self {
         Self {
             raw: Box::new([0; Self::SIZE]),
@@ -72,6 +76,7 @@ impl IoRegisters {
             ppu: Ppu::new(),
             keypad: Keypad::new(),
             power: PowerControl::new(),
+            wait_control: WaitControl::new(),
         }
     }
 
@@ -152,6 +157,14 @@ impl IoRegisters {
         }
     }
 
+    pub const fn wait_control(&self) -> &WaitControl {
+        &self.wait_control
+    }
+
+    pub fn wait_control_mut(&mut self) -> &mut WaitControl {
+        &mut self.wait_control
+    }
+
     pub fn tick(&mut self, cycles: u32) {
         /*
          * Advance the PPU first so timing events can queue DMA requests.
@@ -203,6 +216,7 @@ impl IoRegisters {
         self.ppu.reset();
         self.keypad.reset();
         self.power.reset();
+        self.wait_control.reset();
     }
 
     pub fn read8(&self, offset: u32) -> u8 {
@@ -227,6 +241,7 @@ impl IoRegisters {
                 | Self::KEYCNT_OFFSET
                 | Self::IE_OFFSET
                 | Self::IF_OFFSET
+                | Self::WAITCNT_OFFSET
                 | Self::IME_OFFSET
         ) || decode_dma_register(aligned).is_some()
             || decode_timer_register(aligned).is_some()
@@ -283,6 +298,15 @@ impl IoRegisters {
             let result = self.keypad.write_control(updated);
 
             self.apply_keypad_result(result);
+            return;
+        }
+
+        if aligned == Self::WAITCNT_OFFSET {
+            let current = self.wait_control.raw();
+
+            let updated = replace_byte(current, high_byte, value);
+
+            self.wait_control.write(updated);
             return;
         }
 
@@ -396,6 +420,10 @@ impl IoRegisters {
                 return self.keypad.read_control();
             }
 
+            Self::WAITCNT_OFFSET => {
+                return self.wait_control.raw();
+            }
+
             /*
              * POSTFLG and HALTCNT share one halfword.
              *
@@ -480,6 +508,11 @@ impl IoRegisters {
                 let result = self.keypad.write_control(value);
 
                 self.apply_keypad_result(result);
+                return;
+            }
+
+            Self::WAITCNT_OFFSET => {
+                self.wait_control.write(value);
                 return;
             }
 
@@ -705,7 +738,7 @@ mod tests {
 
     use crate::bus::{
         DmaChannelIndex, DmaTransferWidth, InterruptController, InterruptSource, Key,
-        PowerStateRequest, Ppu, TimerIndex,
+        PowerStateRequest, Ppu, TimerIndex, WaitControl,
     };
 
     #[test]
@@ -1154,5 +1187,41 @@ mod tests {
          * HALTCNT is write-only, so the high read byte is zero.
          */
         assert_eq!(io.read16(IoRegisters::POSTFLG_OFFSET,), 0,);
+    }
+
+    #[test]
+    fn waitcnt_is_mapped() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::WAITCNT_OFFSET, 0x4317);
+
+        assert_eq!(
+            io.read16(IoRegisters::WAITCNT_OFFSET,),
+            0x4317 & WaitControl::WRITABLE_MASK,
+        );
+    }
+
+    #[test]
+    fn waitcnt_byte_access_is_little_endian() {
+        let mut io = IoRegisters::new();
+
+        io.write8(IoRegisters::WAITCNT_OFFSET, 0x17);
+
+        io.write8(IoRegisters::WAITCNT_OFFSET + 1, 0x43);
+
+        assert_eq!(
+            io.read16(IoRegisters::WAITCNT_OFFSET,),
+            0x4317 & WaitControl::WRITABLE_MASK,
+        );
+    }
+
+    #[test]
+    fn waitcnt_reset_value_is_zero() {
+        let io = IoRegisters::new();
+
+        assert_eq!(
+            io.read16(IoRegisters::WAITCNT_OFFSET,),
+            WaitControl::RESET_VALUE,
+        );
     }
 }

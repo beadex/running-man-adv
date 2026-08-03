@@ -111,3 +111,35 @@ pub use self::status_register::{
 };
 
 pub use self::status_register_executor::{StatusRegisterExecutionError, execute_status_register};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArmExecutionResult {
+    /*
+     * Cycles consumed after instruction fetch.
+     *
+     * Memory instructions return their data-access cycles here.
+     * Simple ALU instructions currently use one internal cycle.
+     */
+    pub cycles: u32,
+
+    /*
+     * True when execution changes the normal linear PC flow.
+     */
+    pub branch: bool,
+}
+
+impl ArmExecutionResult {
+    pub const fn sequential(cycles: u32) -> Self {
+        Self {
+            cycles,
+            branch: false,
+        }
+    }
+
+    pub const fn with_branch(cycles: u32) -> Self {
+        Self {
+            cycles,
+            branch: true,
+        }
+    }
+}

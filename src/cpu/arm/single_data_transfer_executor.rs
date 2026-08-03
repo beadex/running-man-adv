@@ -1,4 +1,7 @@
-use crate::{bus::Bus, cpu::Registers};
+use crate::{
+    bus::{AccessKind, Bus},
+    cpu::Registers,
+};
 
 use super::{SingleDataTransferInstruction, TransferOffset, shift_immediate};
 
@@ -7,6 +10,14 @@ pub struct SingleDataTransferExecutionResult {
     pub address: u32,
     pub loaded_value: Option<u32>,
     pub written_back_value: Option<u32>,
+
+    /*
+     * Memory access cycles consumed by this instruction.
+     *
+     * Instruction fetch cycles are accounted for by Cpu::step_arm().
+     */
+    pub cycles: u32,
+
     pub branch: bool,
 }
 
@@ -84,20 +95,28 @@ pub fn execute_single_data_transfer(
 
     let mut loaded_value = None;
     let mut branch = false;
+    let memory_cycles;
 
     if instruction.load {
-        let value = if instruction.byte {
-            bus.read8(transfer_address) as u32
+        let timed_value = if instruction.byte {
+            let access = bus.read8_timed(transfer_address, AccessKind::NonSequential);
+
+            TimedWordValue {
+                value: access.value as u32,
+                cycles: access.cycles,
+            }
         } else {
-            read_unaligned_word(bus, transfer_address)
+            read_unaligned_word_timed(bus, transfer_address)
         };
+
+        let value = timed_value.value;
+        memory_cycles = timed_value.cycles;
 
         loaded_value = Some(value);
 
         if instruction.rd as usize == Registers::PC {
             /*
              * ARMv4 LDR PC does not switch ARM/Thumb state.
-             * Force word alignment for the new ARM PC.
              */
             registers.set_pc(value & !3);
             branch = true;
@@ -107,15 +126,15 @@ pub fn execute_single_data_transfer(
     } else {
         let value = store_value.expect("store value must exist for STR");
 
-        if instruction.byte {
-            bus.write8(transfer_address, value as u8);
+        memory_cycles = if instruction.byte {
+            bus.write8_timed(transfer_address, value as u8, AccessKind::NonSequential)
         } else {
             /*
-             * Misaligned word stores are forced down to a
-             * word-aligned address.
+             * Misaligned word stores are forced to the aligned word
+             * containing the requested address.
              */
-            bus.write32(transfer_address & !3, value);
-        }
+            bus.write32_timed(transfer_address & !3, value, AccessKind::NonSequential)
+        };
     }
 
     let written_back_value = if effective_write_back {
@@ -130,6 +149,7 @@ pub fn execute_single_data_transfer(
         address: transfer_address,
         loaded_value,
         written_back_value,
+        cycles: memory_cycles,
         branch,
     })
 }
@@ -166,12 +186,22 @@ fn evaluate_offset(registers: &Registers, offset: TransferOffset, old_carry: boo
     }
 }
 
-fn read_unaligned_word(bus: &Bus, address: u32) -> u32 {
-    let aligned_value = bus.read32(address & !3);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimedWordValue {
+    value: u32,
+    cycles: u32,
+}
+
+fn read_unaligned_word_timed(bus: &Bus, address: u32) -> TimedWordValue {
+    let access = bus.read32_timed(address & !3, AccessKind::NonSequential);
 
     let rotation = (address & 3) * 8;
 
-    aligned_value.rotate_right(rotation)
+    TimedWordValue {
+        value: access.value.rotate_right(rotation),
+
+        cycles: access.cycles,
+    }
 }
 
 #[cfg(test)]
@@ -445,5 +475,28 @@ mod tests {
             result,
             Err(SingleDataTransferExecutionError::LoadWriteBackBaseEqualsDestination)
         );
+    }
+
+    #[test]
+    fn ldr_from_ewram_reports_memory_cycles() {
+        let mut registers = Registers::new();
+
+        let mut bus = Bus::new();
+
+        bus.write32(0x0200_0100, 0x1234_5678);
+
+        registers.write(1, 0x0200_0100);
+
+        let instruction = decode_single_data_transfer(0xE591_0000).unwrap();
+
+        let result =
+            execute_single_data_transfer(&mut registers, &mut bus, instruction, 0x0800_0000)
+                .unwrap();
+
+        /*
+         * EWRAM word access uses two 16-bit transfers:
+         * 3 + 3 cycles.
+         */
+        assert_eq!(result.cycles, 6);
     }
 }

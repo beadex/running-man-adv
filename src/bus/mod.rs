@@ -9,6 +9,7 @@ mod memory;
 mod power;
 mod ppu;
 mod timer;
+mod waitstate;
 
 pub use self::dma::{
     DMA_CHANNEL_COUNT, DmaAddressControl, DmaChannel, DmaChannelIndex, DmaControl, DmaController,
@@ -26,6 +27,8 @@ pub use self::power::{PowerControl, PowerStateRequest};
 pub use self::ppu::{DispStat, Ppu, PpuTickResult};
 
 pub use self::timer::{TIMER_COUNT, Timer, TimerControl, TimerController, TimerIndex};
+
+pub use self::waitstate::{AccessKind, AccessWidth, MemoryRegion, TimedAccess, WaitControl};
 
 pub(crate) const GAME_PAK_ROM_MAX_SIZE: usize = 32 * 1024 * 1024;
 
@@ -172,6 +175,8 @@ impl Bus {
 
     pub const REG_HALTCNT: u32 = IoRegisters::BASE + IoRegisters::HALTCNT_OFFSET;
 
+    pub const REG_WAITCNT: u32 = IoRegisters::BASE + IoRegisters::WAITCNT_OFFSET;
+
     pub fn new() -> Self {
         Self {
             bios: Box::new([0; BIOS_SIZE]),
@@ -288,6 +293,14 @@ impl Bus {
         self.interrupt_controller().enabled_pending() != 0
     }
 
+    pub const fn wait_control(&self) -> &WaitControl {
+        self.io.wait_control()
+    }
+
+    pub fn access_cycles(&self, address: u32, width: AccessWidth, kind: AccessKind) -> u32 {
+        self.io.wait_control().access_cycles(address, width, kind)
+    }
+
     pub fn read8(&self, address: u32) -> u8 {
         match address {
             BIOS_BASE..=0x0000_3FFF => {
@@ -342,6 +355,12 @@ impl Bus {
 
             _ => 0,
         }
+    }
+
+    pub fn read8_timed(&self, address: u32, kind: AccessKind) -> TimedAccess<u8> {
+        let cycles = self.access_cycles(address, AccessWidth::Byte, kind);
+
+        TimedAccess::new(self.read8(address), cycles)
     }
 
     pub fn write8(&mut self, address: u32, value: u8) {
@@ -402,6 +421,14 @@ impl Bus {
         }
     }
 
+    pub fn write8_timed(&mut self, address: u32, value: u8, kind: AccessKind) -> u32 {
+        let cycles = self.access_cycles(address, AccessWidth::Byte, kind);
+
+        self.write8(address, value);
+
+        cycles
+    }
+
     pub fn read16(&self, address: u32) -> u16 {
         let aligned = address & !1;
 
@@ -415,6 +442,12 @@ impl Bus {
         let high = self.read8(aligned.wrapping_add(1));
 
         u16::from_le_bytes([low, high])
+    }
+
+    pub fn read16_timed(&self, address: u32, kind: AccessKind) -> TimedAccess<u16> {
+        let cycles = self.access_cycles(address, AccessWidth::Halfword, kind);
+
+        TimedAccess::new(self.read16(address), cycles)
     }
 
     pub fn write16(&mut self, address: u32, value: u16) {
@@ -433,6 +466,14 @@ impl Bus {
         self.write8(aligned, low);
 
         self.write8(aligned.wrapping_add(1), high);
+    }
+
+    pub fn write16_timed(&mut self, address: u32, value: u16, kind: AccessKind) -> u32 {
+        let cycles = self.access_cycles(address, AccessWidth::Halfword, kind);
+
+        self.write16(address, value);
+
+        cycles
     }
 
     pub fn read32(&self, address: u32) -> u32 {
@@ -455,6 +496,12 @@ impl Bus {
         u32::from_le_bytes([b0, b1, b2, b3])
     }
 
+    pub fn read32_timed(&self, address: u32, kind: AccessKind) -> TimedAccess<u32> {
+        let cycles = self.access_cycles(address, AccessWidth::Word, kind);
+
+        TimedAccess::new(self.read32(address), cycles)
+    }
+
     pub fn write32(&mut self, address: u32, value: u32) {
         let aligned = address & !3;
 
@@ -471,6 +518,14 @@ impl Bus {
         for (index, byte) in bytes.into_iter().enumerate() {
             self.write8(aligned.wrapping_add(index as u32), byte);
         }
+    }
+
+    pub fn write32_timed(&mut self, address: u32, value: u32, kind: AccessKind) -> u32 {
+        let cycles = self.access_cycles(address, AccessWidth::Word, kind);
+
+        self.write32(address, value);
+
+        cycles
     }
 
     fn read_rom8(&self, address: u32) -> u8 {
@@ -498,8 +553,10 @@ impl Bus {
 
     pub fn run_pending_dma(&mut self) -> Option<DmaRunResult> {
         /*
-         * Extract the request first, releasing the mutable borrow of
-         * IoRegisters before accessing memory through Bus.
+         * Take a snapshot of the pending DMA request first.
+         *
+         * This releases the mutable borrow of IoRegisters before DMA
+         * accesses memory through Bus.
          */
         let request = self.io.dma_mut().next_pending_request()?;
 
@@ -509,28 +566,57 @@ impl Bus {
 
         let mut destination = align_dma_address(request.destination, request.width);
 
-        for _ in 0..request.count {
+        let mut cycles = 0u32;
+
+        for transfer_index in 0..request.count {
+            /*
+             * First transfer unit is non-sequential.
+             * Following units continue sequentially.
+             *
+             * Source and destination use separate variables so their
+             * sequencing can be modeled independently later.
+             */
+            let source_kind = if transfer_index == 0 {
+                AccessKind::NonSequential
+            } else {
+                AccessKind::Sequential
+            };
+
+            let destination_kind = if transfer_index == 0 {
+                AccessKind::NonSequential
+            } else {
+                AccessKind::Sequential
+            };
+
             match request.width {
                 DmaTransferWidth::Halfword => {
-                    let value = self.read16(source);
+                    let read = self.read16_timed(source, source_kind);
 
-                    self.write16(destination, value);
+                    let write_cycles =
+                        self.write16_timed(destination, read.value, destination_kind);
+
+                    cycles = cycles
+                        .saturating_add(read.cycles)
+                        .saturating_add(write_cycles);
                 }
 
                 DmaTransferWidth::Word => {
-                    let value = self.read32(source);
+                    let read = self.read32_timed(source, source_kind);
 
-                    self.write32(destination, value);
+                    let write_cycles =
+                        self.write32_timed(destination, read.value, destination_kind);
+
+                    cycles = cycles
+                        .saturating_add(read.cycles)
+                        .saturating_add(write_cycles);
                 }
             }
 
-            source = advance_dma_address(source, width_bytes, request.source_control, true);
+            source = advance_dma_address(source, width_bytes, request.source_control);
 
             destination =
-                advance_dma_address(destination, width_bytes, request.destination_control, false);
+                advance_dma_address(destination, width_bytes, request.destination_control);
         }
-
-        let request_interrupt = request.irq_enabled;
 
         self.io.dma_mut().complete_transfer(DmaTransferCompletion {
             channel: request.channel,
@@ -539,25 +625,21 @@ impl Bus {
             transferred_units: request.count,
         });
 
-        if request_interrupt {
+        if request.irq_enabled {
             self.io
                 .request_interrupt(request.channel.interrupt_source());
         }
 
-        /*
-         * Placeholder timing:
-         *
-         * one read plus one write per transfer unit.
-         *
-         * Wait states and sequential/non-sequential accesses will
-         * replace this approximation later.
-         */
-        let cycles = request.count.saturating_mul(2).max(1);
-
         Some(DmaRunResult {
             channel: request.channel,
             transferred_units: request.count,
-            cycles,
+
+            /*
+             * A zero-cycle DMA scheduling unit would be dangerous for the
+             * outer scheduler. Count is normally never zero after DMA
+             * latching, but keep this defensive guard.
+             */
+            cycles: cycles.max(1),
         })
     }
 }
@@ -596,7 +678,7 @@ fn align_dma_address(address: u32, width: DmaTransferWidth) -> u32 {
     }
 }
 
-fn advance_dma_address(address: u32, width: u32, control: DmaAddressControl, source: bool) -> u32 {
+fn advance_dma_address(address: u32, width: u32, control: DmaAddressControl) -> u32 {
     match control {
         DmaAddressControl::Increment | DmaAddressControl::IncrementReload => {
             address.wrapping_add(width)
@@ -610,7 +692,9 @@ fn advance_dma_address(address: u32, width: u32, control: DmaAddressControl, sou
 
 #[cfg(test)]
 mod tests {
-    use super::{Bus, BusLoadError, DmaChannelIndex, InterruptController, InterruptSource, Ppu};
+    use super::{
+        AccessKind, Bus, BusLoadError, DmaChannelIndex, InterruptController, InterruptSource, Ppu,
+    };
 
     #[test]
     fn bios_is_loaded_and_read_only() {
@@ -962,5 +1046,93 @@ mod tests {
          * Repeat DMA stays enabled.
          */
         assert_ne!(bus.read16(Bus::REG_DMA0CNT_H) & (1 << 15), 0,);
+    }
+
+    #[test]
+    fn ewram_word_read_costs_six_cycles() {
+        let bus = Bus::new();
+
+        let access = bus.read32_timed(0x0200_0000, AccessKind::NonSequential);
+
+        assert_eq!(access.cycles, 6);
+    }
+
+    #[test]
+    fn iwram_word_read_costs_one_cycle() {
+        let bus = Bus::new();
+
+        let access = bus.read32_timed(0x0300_0000, AccessKind::NonSequential);
+
+        assert_eq!(access.cycles, 1);
+    }
+
+    #[test]
+    fn waitcnt_changes_game_pak_timing() {
+        let mut bus = Bus::new();
+
+        assert_eq!(
+            bus.read16_timed(0x0800_0000, AccessKind::NonSequential,)
+                .cycles,
+            4,
+        );
+
+        /*
+         * WS0 first = 2 cycles.
+         */
+        bus.write16(Bus::REG_WAITCNT, 0b10 << 2);
+
+        assert_eq!(
+            bus.read16_timed(0x0800_0000, AccessKind::NonSequential,)
+                .cycles,
+            2,
+        );
+    }
+
+    #[test]
+    fn sequential_game_pak_access_uses_second_timing() {
+        let mut bus = Bus::new();
+
+        /*
+         * WS0 first = 3
+         * WS0 second = 1
+         */
+        bus.write16(Bus::REG_WAITCNT, (0b01 << 2) | (1 << 4));
+
+        assert_eq!(
+            bus.read16_timed(0x0800_0000, AccessKind::NonSequential,)
+                .cycles,
+            3,
+        );
+
+        assert_eq!(
+            bus.read16_timed(0x0800_0002, AccessKind::Sequential,)
+                .cycles,
+            1,
+        );
+    }
+
+    #[test]
+    fn dma_uses_memory_access_timing() {
+        let mut bus = Bus::new();
+
+        bus.write16(0x0200_0100, 0xCAFE);
+
+        bus.write32(Bus::REG_DMA0SAD, 0x0200_0100);
+
+        bus.write32(Bus::REG_DMA0DAD, 0x0300_0100);
+
+        bus.write16(Bus::REG_DMA0CNT_L, 1);
+
+        bus.write16(Bus::REG_DMA0CNT_H, 1 << 15);
+
+        let result = bus.run_pending_dma().unwrap();
+
+        /*
+         * EWRAM halfword read = 3 cycles.
+         * IWRAM halfword write = 1 cycle.
+         */
+        assert_eq!(result.cycles, 4);
+
+        assert_eq!(bus.read16(0x0300_0100), 0xCAFE,);
     }
 }
