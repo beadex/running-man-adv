@@ -601,6 +601,7 @@ impl Bus {
         {
             let vram = self.vram.as_slice();
             let palette = self.palette.as_slice();
+            let oam = self.oam.as_slice();
             let video = self.io.video_mut();
 
             /*
@@ -612,7 +613,7 @@ impl Bus {
             }
 
             for line in result.completed_visible_lines.iter() {
-                video.render_scanline(line, vram, palette);
+                video.render_scanline(line, vram, palette, oam);
             }
 
             /*

@@ -92,6 +92,14 @@ impl DisplayControl {
         self.raw & Self::BG3_ENABLE_MASK != 0
     }
 
+    pub const fn obj_enabled(self) -> bool {
+        self.raw & Self::OBJ_ENABLE_MASK != 0
+    }
+
+    pub const fn obj_mapping_1d(self) -> bool {
+        self.raw & Self::OBJ_MAPPING_1D_MASK != 0
+    }
+
     pub fn reset(&mut self) {
         *self = Self::new();
     }
@@ -288,6 +296,90 @@ impl Default for AffineBackground {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackgroundPixel {
+    color: u32,
+    priority: u8,
+    layer: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObjectPixel {
+    color: u32,
+    priority: u8,
+    oam_index: u8,
+    semi_transparent: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObjectAttributes {
+    attr0: u16,
+    attr1: u16,
+    attr2: u16,
+}
+
+impl ObjectAttributes {
+    const fn y(self) -> u16 {
+        self.attr0 & 0x00FF
+    }
+
+    const fn affine(self) -> bool {
+        self.attr0 & (1 << 8) != 0
+    }
+
+    const fn double_size(self) -> bool {
+        self.affine() && self.attr0 & (1 << 9) != 0
+    }
+
+    const fn disabled(self) -> bool {
+        !self.affine() && self.attr0 & (1 << 9) != 0
+    }
+
+    const fn object_mode(self) -> u8 {
+        ((self.attr0 >> 10) & 0b11) as u8
+    }
+
+    const fn color_8bpp(self) -> bool {
+        self.attr0 & (1 << 13) != 0
+    }
+
+    const fn shape(self) -> u8 {
+        ((self.attr0 >> 14) & 0b11) as u8
+    }
+
+    const fn x(self) -> u16 {
+        self.attr1 & 0x01FF
+    }
+
+    const fn affine_parameter_index(self) -> usize {
+        ((self.attr1 >> 9) & 0x1F) as usize
+    }
+
+    const fn horizontal_flip(self) -> bool {
+        !self.affine() && self.attr1 & (1 << 12) != 0
+    }
+
+    const fn vertical_flip(self) -> bool {
+        !self.affine() && self.attr1 & (1 << 13) != 0
+    }
+
+    const fn size(self) -> u8 {
+        ((self.attr1 >> 14) & 0b11) as u8
+    }
+
+    const fn tile_number(self) -> usize {
+        (self.attr2 & 0x03FF) as usize
+    }
+
+    const fn priority(self) -> u8 {
+        ((self.attr2 >> 10) & 0b11) as u8
+    }
+
+    const fn palette_bank(self) -> usize {
+        ((self.attr2 >> 12) & 0x0F) as usize
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Video {
     display_control: DisplayControl,
@@ -385,7 +477,7 @@ impl Video {
         self.bg3.reload_reference_points();
     }
 
-    pub fn render_scanline(&mut self, line: u16, vram: &[u8], palette: &[u8]) {
+    pub fn render_scanline(&mut self, line: u16, vram: &[u8], palette: &[u8], oam: &[u8]) {
         let line = line as usize;
 
         if line >= SCREEN_HEIGHT {
@@ -399,64 +491,98 @@ impl Video {
         }
 
         match self.display_control.mode() {
-            VideoMode::Mode2 => self.render_mode2_scanline(line, vram, palette),
-            VideoMode::Mode3 => self.render_mode3_scanline(line, vram),
+            VideoMode::Mode2 => self.render_mode2_scanline(line, vram, palette, oam),
+            VideoMode::Mode3 => self.render_mode3_scanline(line, vram, palette, oam),
             _ => self.fill_scanline(line, Self::UNIMPLEMENTED_MODE_PIXEL),
         }
 
         self.advance_affine_scanline();
     }
 
-    fn render_mode2_scanline(&mut self, line: usize, vram: &[u8], palette: &[u8]) {
-        let backdrop = read_bg_palette_color(palette, 0);
+    fn render_mode2_scanline(&mut self, line: usize, vram: &[u8], palette: &[u8], oam: &[u8]) {
+        let backdrop = read_palette_color(palette, 0);
         let destination_start = line * SCREEN_WIDTH;
 
         for x in 0..SCREEN_WIDTH {
-            let bg2_pixel = if self.display_control.bg2_enabled() {
-                sample_affine_background(&self.bg2, x, vram, palette)
+            let background = self.sample_mode2_background_pixel(x, vram, palette);
+            let object = if self.display_control.obj_enabled() {
+                sample_top_object_pixel(self.display_control, x, line, vram, palette, oam)
             } else {
                 None
             };
 
-            let bg3_pixel = if self.display_control.bg3_enabled() {
-                sample_affine_background(&self.bg3, x, vram, palette)
-            } else {
-                None
-            };
-
-            let color = match (bg2_pixel, bg3_pixel) {
-                (Some(bg2), Some(bg3)) => {
-                    /*
-                     * Smaller priority number appears on top.
-                     * On equal priority, BG2 wins over BG3.
-                     */
-                    if self.bg2.control.priority() <= self.bg3.control.priority() {
-                        bg2
-                    } else {
-                        bg3
-                    }
-                }
-
-                (Some(bg2), None) => bg2,
-                (None, Some(bg3)) => bg3,
-                (None, None) => backdrop,
-            };
+            let color = compose_background_and_object(background, object, backdrop);
 
             self.framebuffer[destination_start + x] = color;
         }
     }
 
-    fn render_mode3_scanline(&mut self, line: usize, vram: &[u8]) {
+    fn sample_mode2_background_pixel(
+        &self,
+        x: usize,
+        vram: &[u8],
+        palette: &[u8],
+    ) -> Option<BackgroundPixel> {
+        let bg2 = if self.display_control.bg2_enabled() {
+            sample_affine_background(&self.bg2, x, vram, palette).map(|color| BackgroundPixel {
+                color,
+                priority: self.bg2.control.priority(),
+                layer: 2,
+            })
+        } else {
+            None
+        };
+
+        let bg3 = if self.display_control.bg3_enabled() {
+            sample_affine_background(&self.bg3, x, vram, palette).map(|color| BackgroundPixel {
+                color,
+                priority: self.bg3.control.priority(),
+                layer: 3,
+            })
+        } else {
+            None
+        };
+
+        match (bg2, bg3) {
+            (Some(bg2), Some(bg3)) => {
+                if bg2.priority < bg3.priority
+                    || (bg2.priority == bg3.priority && bg2.layer < bg3.layer)
+                {
+                    Some(bg2)
+                } else {
+                    Some(bg3)
+                }
+            }
+
+            (Some(bg2), None) => Some(bg2),
+            (None, Some(bg3)) => Some(bg3),
+            (None, None) => None,
+        }
+    }
+
+    fn render_mode3_scanline(&mut self, line: usize, vram: &[u8], palette: &[u8], oam: &[u8]) {
         let source_line_start = line * SCREEN_WIDTH * 2;
         let destination_line_start = line * SCREEN_WIDTH;
+        let bg_priority = self.bg2.control.priority();
 
         for x in 0..SCREEN_WIDTH {
             let source_offset = source_line_start + x * 2;
             let low = vram.get(source_offset).copied().unwrap_or(0);
             let high = vram.get(source_offset + 1).copied().unwrap_or(0);
-            let color = u16::from_le_bytes([low, high]);
+            let background = BackgroundPixel {
+                color: bgr555_to_rgba8888(u16::from_le_bytes([low, high])),
+                priority: bg_priority,
+                layer: 2,
+            };
 
-            self.framebuffer[destination_line_start + x] = bgr555_to_rgba8888(color);
+            let object = if self.display_control.obj_enabled() {
+                sample_top_object_pixel(self.display_control, x, line, vram, palette, oam)
+            } else {
+                None
+            };
+
+            self.framebuffer[destination_line_start + x] =
+                compose_background_and_object(Some(background), object, background.color);
         }
     }
 
@@ -539,11 +665,341 @@ fn sample_affine_background(
         return None;
     }
 
-    Some(read_bg_palette_color(palette, palette_index))
+    Some(read_palette_color(palette, palette_index))
 }
 
-fn read_bg_palette_color(palette: &[u8], index: u8) -> u32 {
-    let offset = index as usize * 2;
+fn compose_background_and_object(
+    background: Option<BackgroundPixel>,
+    object: Option<ObjectPixel>,
+    backdrop: u32,
+) -> u32 {
+    match (background, object) {
+        /*
+         * When OBJ and BG priorities are equal, OBJ is above BG.
+         */
+        (Some(background), Some(object)) => {
+            if object.priority <= background.priority {
+                object.color
+            } else {
+                background.color
+            }
+        }
+
+        (Some(background), None) => background.color,
+        (None, Some(object)) => object.color,
+        (None, None) => backdrop,
+    }
+}
+
+fn sample_top_object_pixel(
+    display_control: DisplayControl,
+    screen_x: usize,
+    screen_y: usize,
+    vram: &[u8],
+    palette: &[u8],
+    oam: &[u8],
+) -> Option<ObjectPixel> {
+    /*
+     * OBJ-to-OBJ priority is determined by OAM index. OBJ0 is above OBJ1,
+     * regardless of the two-bit OBJ-to-BG priority field.
+     */
+    for object_index in 0..128usize {
+        let Some(attributes) = read_object_attributes(oam, object_index) else {
+            continue;
+        };
+
+        if attributes.disabled() || attributes.shape() == 3 {
+            continue;
+        }
+
+        /*
+         * OBJ mode 2 is OBJ-window and is not visible. Mode 3 is prohibited
+         * on GBA.
+         */
+        if attributes.object_mode() >= 2 {
+            continue;
+        }
+
+        let Some((texture_width, texture_height)) =
+            object_dimensions(attributes.shape(), attributes.size())
+        else {
+            continue;
+        };
+
+        let display_width = if attributes.double_size() {
+            texture_width * 2
+        } else {
+            texture_width
+        };
+
+        let display_height = if attributes.double_size() {
+            texture_height * 2
+        } else {
+            texture_height
+        };
+
+        let object_x = sign_extend_object_x(attributes.x());
+        let object_y = attributes.y() as i32;
+
+        let local_x = screen_x as i32 - object_x;
+
+        /*
+         * Y coordinates wrap in an 8-bit space. This also handles sprites
+         * positioned partly above the visible screen.
+         */
+        let local_y = ((screen_y as i32 - object_y) & 0xFF) as i32;
+
+        if local_x < 0
+            || local_x >= display_width as i32
+            || local_y < 0
+            || local_y >= display_height as i32
+        {
+            continue;
+        }
+
+        let source = if attributes.affine() {
+            affine_object_source_coordinates(
+                attributes,
+                local_x,
+                local_y,
+                texture_width,
+                texture_height,
+                display_width,
+                display_height,
+                oam,
+            )
+        } else {
+            regular_object_source_coordinates(
+                attributes,
+                local_x,
+                local_y,
+                texture_width,
+                texture_height,
+            )
+        };
+
+        let Some((source_x, source_y)) = source else {
+            continue;
+        };
+
+        let Some(color) = sample_object_texel(
+            display_control,
+            attributes,
+            source_x,
+            source_y,
+            texture_width,
+            vram,
+            palette,
+        ) else {
+            continue;
+        };
+
+        return Some(ObjectPixel {
+            color,
+            priority: attributes.priority(),
+            oam_index: object_index as u8,
+            semi_transparent: attributes.object_mode() == 1,
+        });
+    }
+
+    None
+}
+
+fn read_object_attributes(oam: &[u8], object_index: usize) -> Option<ObjectAttributes> {
+    let base = object_index.checked_mul(8)?;
+
+    Some(ObjectAttributes {
+        attr0: read_u16(oam, base)?,
+        attr1: read_u16(oam, base + 2)?,
+        attr2: read_u16(oam, base + 4)?,
+    })
+}
+
+fn object_dimensions(shape: u8, size: u8) -> Option<(usize, usize)> {
+    const DIMENSIONS: [[(usize, usize); 4]; 3] = [
+        [(8, 8), (16, 16), (32, 32), (64, 64)],
+        [(16, 8), (32, 8), (32, 16), (64, 32)],
+        [(8, 16), (8, 32), (16, 32), (32, 64)],
+    ];
+
+    DIMENSIONS
+        .get(shape as usize)
+        .and_then(|sizes| sizes.get(size as usize))
+        .copied()
+}
+
+fn sign_extend_object_x(value: u16) -> i32 {
+    let value = (value & 0x01FF) as i32;
+
+    if value >= 256 { value - 512 } else { value }
+}
+
+fn regular_object_source_coordinates(
+    attributes: ObjectAttributes,
+    local_x: i32,
+    local_y: i32,
+    texture_width: usize,
+    texture_height: usize,
+) -> Option<(usize, usize)> {
+    let mut source_x = local_x as usize;
+    let mut source_y = local_y as usize;
+
+    if attributes.horizontal_flip() {
+        source_x = texture_width - 1 - source_x;
+    }
+
+    if attributes.vertical_flip() {
+        source_y = texture_height - 1 - source_y;
+    }
+
+    Some((source_x, source_y))
+}
+
+fn affine_object_source_coordinates(
+    attributes: ObjectAttributes,
+    local_x: i32,
+    local_y: i32,
+    texture_width: usize,
+    texture_height: usize,
+    display_width: usize,
+    display_height: usize,
+    oam: &[u8],
+) -> Option<(usize, usize)> {
+    let (pa, pb, pc, pd) = read_object_affine_matrix(oam, attributes.affine_parameter_index())?;
+
+    let centered_x = local_x - display_width as i32 / 2;
+    let centered_y = local_y - display_height as i32 / 2;
+
+    let source_x =
+        ((pa as i32 * centered_x + pb as i32 * centered_y) >> 8) + texture_width as i32 / 2;
+
+    let source_y =
+        ((pc as i32 * centered_x + pd as i32 * centered_y) >> 8) + texture_height as i32 / 2;
+
+    if source_x < 0
+        || source_y < 0
+        || source_x >= texture_width as i32
+        || source_y >= texture_height as i32
+    {
+        return None;
+    }
+
+    Some((source_x as usize, source_y as usize))
+}
+
+fn read_object_affine_matrix(oam: &[u8], parameter_index: usize) -> Option<(i16, i16, i16, i16)> {
+    let base = parameter_index.checked_mul(32)?;
+
+    Some((
+        read_u16(oam, base + 6)? as i16,
+        read_u16(oam, base + 14)? as i16,
+        read_u16(oam, base + 22)? as i16,
+        read_u16(oam, base + 30)? as i16,
+    ))
+}
+
+fn sample_object_texel(
+    display_control: DisplayControl,
+    attributes: ObjectAttributes,
+    source_x: usize,
+    source_y: usize,
+    texture_width: usize,
+    vram: &[u8],
+    palette: &[u8],
+) -> Option<u32> {
+    let color_8bpp = attributes.color_8bpp();
+    let tile_units_per_tile = if color_8bpp { 2 } else { 1 };
+
+    let mut base_tile = attributes.tile_number();
+
+    /*
+     * 8bpp OBJ tiles occupy two 32-byte tile-number units. Bit zero of the
+     * base tile number is ignored.
+     */
+    if color_8bpp {
+        base_tile &= !1;
+    }
+
+    let tile_x = source_x / 8;
+    let tile_y = source_y / 8;
+
+    let tile_unit = if display_control.obj_mapping_1d() {
+        let row_stride = (texture_width / 8) * tile_units_per_tile;
+        base_tile + tile_y * row_stride + tile_x * tile_units_per_tile
+    } else {
+        /*
+         * 2D mapping always has a 32 tile-unit row boundary.
+         */
+        base_tile + tile_y * 32 + tile_x * tile_units_per_tile
+    };
+
+    let bitmap_mode = matches!(
+        display_control.mode(),
+        VideoMode::Mode3 | VideoMode::Mode4 | VideoMode::Mode5
+    );
+
+    /*
+     * Modes 0-2 expose 32 KiB of OBJ tile VRAM at 0x10000.
+     * Bitmap modes expose only the upper 16 KiB at 0x14000 and require
+     * tile numbers 512-1023.
+     */
+    let object_vram_base = if bitmap_mode {
+        if tile_unit < 512 {
+            return None;
+        }
+
+        0x10000
+    } else {
+        0x10000
+    };
+
+    let tile_address = object_vram_base + tile_unit * 32;
+    let pixel_x = source_x & 7;
+    let pixel_y = source_y & 7;
+
+    let palette_index = if color_8bpp {
+        let address = tile_address + pixel_y * 8 + pixel_x;
+        vram.get(address).copied().unwrap_or(0) as usize
+    } else {
+        let address = tile_address + pixel_y * 4 + pixel_x / 2;
+        let packed = vram.get(address).copied().unwrap_or(0);
+
+        let color = if pixel_x & 1 == 0 {
+            packed & 0x0F
+        } else {
+            packed >> 4
+        };
+
+        if color == 0 {
+            return None;
+        }
+
+        attributes.palette_bank() * 16 + color as usize
+    };
+
+    if palette_index == 0 {
+        return None;
+    }
+
+    /*
+     * OBJ palettes occupy entries 256-511 in palette RAM.
+     */
+    Some(read_palette_color_usize(palette, 256 + palette_index))
+}
+
+fn read_u16(memory: &[u8], offset: usize) -> Option<u16> {
+    let low = *memory.get(offset)?;
+    let high = *memory.get(offset + 1)?;
+
+    Some(u16::from_le_bytes([low, high]))
+}
+
+fn read_palette_color(palette: &[u8], index: u8) -> u32 {
+    read_palette_color_usize(palette, index as usize)
+}
+
+fn read_palette_color_usize(palette: &[u8], index: usize) -> u32 {
+    let offset = index * 2;
     let low = palette.get(offset).copied().unwrap_or(0);
     let high = palette.get(offset + 1).copied().unwrap_or(0);
 
@@ -600,7 +1056,7 @@ mod tests {
         vram[2..4].copy_from_slice(&0x03E0u16.to_le_bytes());
         vram[4..6].copy_from_slice(&0x7C00u16.to_le_bytes());
 
-        video.render_scanline(0, &vram, &palette);
+        video.render_scanline(0, &vram, &palette, &[0; 0x400]);
 
         assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
         assert_eq!(video.framebuffer()[1], 0xFF00_FF00);
@@ -640,7 +1096,7 @@ mod tests {
         palette[2..4].copy_from_slice(&0x001Fu16.to_le_bytes());
 
         video.begin_frame();
-        video.render_scanline(0, &vram, &palette);
+        video.render_scanline(0, &vram, &palette, &[0; 0x400]);
 
         assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
     }
@@ -664,7 +1120,7 @@ mod tests {
         palette[0..2].copy_from_slice(&0x03E0u16.to_le_bytes());
 
         video.begin_frame();
-        video.render_scanline(0, &vram, &palette);
+        video.render_scanline(0, &vram, &palette, &[0; 0x400]);
 
         assert_eq!(video.framebuffer()[0], 0xFF00_FF00);
     }
@@ -699,7 +1155,7 @@ mod tests {
         vram[64 + 7] = 1;
         palette[2..4].copy_from_slice(&0x7C00u16.to_le_bytes());
 
-        video.render_scanline(0, &vram, &palette);
+        video.render_scanline(0, &vram, &palette, &[0; 0x400]);
 
         assert_eq!(video.framebuffer()[0], 0xFF00_00FF);
     }
@@ -735,7 +1191,7 @@ mod tests {
         palette[4..6].copy_from_slice(&0x7C00u16.to_le_bytes());
 
         video.begin_frame();
-        video.render_scanline(0, &vram, &palette);
+        video.render_scanline(0, &vram, &palette, &[0; 0x400]);
 
         assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
     }
@@ -748,12 +1204,194 @@ mod tests {
         let vram = vec![0u8; SCREEN_WIDTH * 2];
         let palette = vec![0u8; 0x400];
 
-        video.render_scanline(0, &vram, &palette);
+        video.render_scanline(0, &vram, &palette, &[0; 0x400]);
 
         assert!(
             video.framebuffer()[0..SCREEN_WIDTH]
                 .iter()
                 .all(|&pixel| pixel == Video::FORCED_BLANK_PIXEL)
         );
+    }
+    #[test]
+    fn mode2_renders_regular_4bpp_object() {
+        let mut video = Video::new();
+
+        /*
+         * Mode 2, OBJ enabled, 1D OBJ mapping.
+         */
+        video.write_display_control(2 | (1 << 4) | (1 << 12));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let mut oam = vec![0u8; 0x400];
+
+        /*
+         * OBJ0: 8x8 at (0,0), regular, 4bpp, tile 0, priority 0,
+         * palette bank 0.
+         */
+        oam[0..2].copy_from_slice(&0u16.to_le_bytes());
+        oam[2..4].copy_from_slice(&0u16.to_le_bytes());
+        oam[4..6].copy_from_slice(&0u16.to_le_bytes());
+
+        /*
+         * First OBJ pixel uses palette color 1.
+         */
+        vram[0x10000] = 0x01;
+        palette[0x202..0x204].copy_from_slice(&0x001Fu16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+    }
+
+    #[test]
+    fn mode2_renders_8bpp_object_with_1d_mapping() {
+        let mut video = Video::new();
+        video.write_display_control(2 | (1 << 4) | (1 << 12));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let mut oam = vec![0u8; 0x400];
+
+        /*
+         * OBJ0: 16x16 square, 8bpp, tile number 0.
+         */
+        let attr0 = 1 << 13;
+        let attr1 = 1 << 14;
+
+        oam[0..2].copy_from_slice(&(attr0 as u16).to_le_bytes());
+        oam[2..4].copy_from_slice(&(attr1 as u16).to_le_bytes());
+        oam[4..6].copy_from_slice(&0u16.to_le_bytes());
+
+        /*
+         * Pixel (8,0) is the first pixel of the second 8bpp tile. In 1D
+         * mapping that tile begins two 32-byte units after tile zero.
+         */
+        vram[0x10000 + 64] = 2;
+        palette[0x204..0x206].copy_from_slice(&0x03E0u16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[8], 0xFF00_FF00);
+    }
+
+    #[test]
+    fn regular_object_flip_is_applied() {
+        let mut video = Video::new();
+        video.write_display_control(2 | (1 << 4) | (1 << 12));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let mut oam = vec![0u8; 0x400];
+
+        /*
+         * 8x8 object with horizontal flip.
+         */
+        oam[0..2].copy_from_slice(&0u16.to_le_bytes());
+        oam[2..4].copy_from_slice(&(1u16 << 12).to_le_bytes());
+        oam[4..6].copy_from_slice(&0u16.to_le_bytes());
+
+        /*
+         * Source x=7 contains color 1.
+         */
+        vram[0x10000 + 3] = 0x10;
+        palette[0x202..0x204].copy_from_slice(&0x7C00u16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFF00_00FF);
+    }
+
+    #[test]
+    fn affine_object_identity_matrix_renders() {
+        let mut video = Video::new();
+        video.write_display_control(2 | (1 << 4) | (1 << 12));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let mut oam = vec![0u8; 0x400];
+
+        /*
+         * OBJ0 affine 8x8, matrix group 0.
+         */
+        oam[0..2].copy_from_slice(&(1u16 << 8).to_le_bytes());
+        oam[2..4].copy_from_slice(&0u16.to_le_bytes());
+        oam[4..6].copy_from_slice(&0u16.to_le_bytes());
+
+        oam[6..8].copy_from_slice(&0x0100u16.to_le_bytes());
+        oam[14..16].copy_from_slice(&0u16.to_le_bytes());
+        oam[22..24].copy_from_slice(&0u16.to_le_bytes());
+        oam[30..32].copy_from_slice(&0x0100u16.to_le_bytes());
+
+        vram[0x10000] = 0x01;
+        palette[0x202..0x204].copy_from_slice(&0x001Fu16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+    }
+
+    #[test]
+    fn lower_oam_index_wins_between_objects() {
+        let mut video = Video::new();
+        video.write_display_control(2 | (1 << 4) | (1 << 12));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let mut oam = vec![0u8; 0x400];
+
+        /*
+         * OBJ0 tile 0 and OBJ1 tile 1 overlap.
+         */
+        oam[0..2].copy_from_slice(&0u16.to_le_bytes());
+        oam[2..4].copy_from_slice(&0u16.to_le_bytes());
+        oam[4..6].copy_from_slice(&0u16.to_le_bytes());
+
+        oam[8..10].copy_from_slice(&0u16.to_le_bytes());
+        oam[10..12].copy_from_slice(&0u16.to_le_bytes());
+        oam[12..14].copy_from_slice(&1u16.to_le_bytes());
+
+        vram[0x10000] = 0x01;
+        vram[0x10000 + 32] = 0x02;
+
+        palette[0x202..0x204].copy_from_slice(&0x001Fu16.to_le_bytes());
+        palette[0x204..0x206].copy_from_slice(&0x7C00u16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+    }
+
+    #[test]
+    fn object_wins_over_background_on_equal_priority() {
+        let mut video = Video::new();
+        video.write_display_control(2 | (1 << 4) | (1 << 10) | (1 << 12));
+
+        {
+            let bg2 = video.affine_background_mut(2);
+            bg2.write_control(1 << 8);
+            bg2.write_pa(0x0100);
+            bg2.write_pd(0x0100);
+        }
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let mut oam = vec![0u8; 0x400];
+
+        vram[0x800] = 1;
+        vram[64] = 1;
+        palette[2..4].copy_from_slice(&0x03E0u16.to_le_bytes());
+
+        oam[0..2].copy_from_slice(&0u16.to_le_bytes());
+        oam[2..4].copy_from_slice(&0u16.to_le_bytes());
+        oam[4..6].copy_from_slice(&0u16.to_le_bytes());
+
+        vram[0x10000] = 0x02;
+        palette[0x204..0x206].copy_from_slice(&0x001Fu16.to_le_bytes());
+
+        video.begin_frame();
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
     }
 }
