@@ -61,6 +61,27 @@ impl IoRegisters {
     pub const DISPSTAT_OFFSET: u32 = 0x0004;
     pub const VCOUNT_OFFSET: u32 = 0x0006;
 
+    pub const BG2CNT_OFFSET: u32 = 0x000C;
+    pub const BG3CNT_OFFSET: u32 = 0x000E;
+
+    pub const BG2PA_OFFSET: u32 = 0x0020;
+    pub const BG2PB_OFFSET: u32 = 0x0022;
+    pub const BG2PC_OFFSET: u32 = 0x0024;
+    pub const BG2PD_OFFSET: u32 = 0x0026;
+    pub const BG2X_L_OFFSET: u32 = 0x0028;
+    pub const BG2X_H_OFFSET: u32 = 0x002A;
+    pub const BG2Y_L_OFFSET: u32 = 0x002C;
+    pub const BG2Y_H_OFFSET: u32 = 0x002E;
+
+    pub const BG3PA_OFFSET: u32 = 0x0030;
+    pub const BG3PB_OFFSET: u32 = 0x0032;
+    pub const BG3PC_OFFSET: u32 = 0x0034;
+    pub const BG3PD_OFFSET: u32 = 0x0036;
+    pub const BG3X_L_OFFSET: u32 = 0x0038;
+    pub const BG3X_H_OFFSET: u32 = 0x003A;
+    pub const BG3Y_L_OFFSET: u32 = 0x003C;
+    pub const BG3Y_H_OFFSET: u32 = 0x003E;
+
     pub const KEYINPUT_OFFSET: u32 = 0x0130;
     pub const KEYCNT_OFFSET: u32 = 0x0132;
 
@@ -243,6 +264,24 @@ impl IoRegisters {
             Self::DISPCNT_OFFSET
                 | Self::DISPSTAT_OFFSET
                 | Self::VCOUNT_OFFSET
+                | Self::BG2CNT_OFFSET
+                | Self::BG3CNT_OFFSET
+                | Self::BG2PA_OFFSET
+                | Self::BG2PB_OFFSET
+                | Self::BG2PC_OFFSET
+                | Self::BG2PD_OFFSET
+                | Self::BG2X_L_OFFSET
+                | Self::BG2X_H_OFFSET
+                | Self::BG2Y_L_OFFSET
+                | Self::BG2Y_H_OFFSET
+                | Self::BG3PA_OFFSET
+                | Self::BG3PB_OFFSET
+                | Self::BG3PC_OFFSET
+                | Self::BG3PD_OFFSET
+                | Self::BG3X_L_OFFSET
+                | Self::BG3X_H_OFFSET
+                | Self::BG3Y_L_OFFSET
+                | Self::BG3Y_H_OFFSET
                 | Self::KEYINPUT_OFFSET
                 | Self::KEYCNT_OFFSET
                 | Self::IE_OFFSET
@@ -303,6 +342,13 @@ impl IoRegisters {
             /*
              * Read-only.
              */
+            return;
+        }
+
+        if is_affine_video_register(aligned) {
+            let current = self.read16(aligned);
+            let updated = replace_byte(current, high_byte, value);
+            self.write16(aligned, updated);
             return;
         }
 
@@ -432,6 +478,43 @@ impl IoRegisters {
                 return self.ppu.vcount();
             }
 
+            Self::BG2CNT_OFFSET => return self.video.affine_background(2).read_control(),
+            Self::BG3CNT_OFFSET => return self.video.affine_background(3).read_control(),
+
+            Self::BG2PA_OFFSET => return self.video.affine_background(2).read_pa(),
+            Self::BG2PB_OFFSET => return self.video.affine_background(2).read_pb(),
+            Self::BG2PC_OFFSET => return self.video.affine_background(2).read_pc(),
+            Self::BG2PD_OFFSET => return self.video.affine_background(2).read_pd(),
+            Self::BG2X_L_OFFSET => {
+                return self.video.affine_background(2).reference_x_raw() as u16;
+            }
+            Self::BG2X_H_OFFSET => {
+                return (self.video.affine_background(2).reference_x_raw() >> 16) as u16;
+            }
+            Self::BG2Y_L_OFFSET => {
+                return self.video.affine_background(2).reference_y_raw() as u16;
+            }
+            Self::BG2Y_H_OFFSET => {
+                return (self.video.affine_background(2).reference_y_raw() >> 16) as u16;
+            }
+
+            Self::BG3PA_OFFSET => return self.video.affine_background(3).read_pa(),
+            Self::BG3PB_OFFSET => return self.video.affine_background(3).read_pb(),
+            Self::BG3PC_OFFSET => return self.video.affine_background(3).read_pc(),
+            Self::BG3PD_OFFSET => return self.video.affine_background(3).read_pd(),
+            Self::BG3X_L_OFFSET => {
+                return self.video.affine_background(3).reference_x_raw() as u16;
+            }
+            Self::BG3X_H_OFFSET => {
+                return (self.video.affine_background(3).reference_x_raw() >> 16) as u16;
+            }
+            Self::BG3Y_L_OFFSET => {
+                return self.video.affine_background(3).reference_y_raw() as u16;
+            }
+            Self::BG3Y_H_OFFSET => {
+                return (self.video.affine_background(3).reference_y_raw() >> 16) as u16;
+            }
+
             Self::KEYINPUT_OFFSET => {
                 return self.keypad.key_input();
             }
@@ -513,6 +596,97 @@ impl IoRegisters {
 
             Self::DISPSTAT_OFFSET => {
                 self.ppu.write_dispstat(value);
+                return;
+            }
+
+            Self::BG2CNT_OFFSET => {
+                self.video.affine_background_mut(2).write_control(value);
+                return;
+            }
+            Self::BG3CNT_OFFSET => {
+                self.video.affine_background_mut(3).write_control(value);
+                return;
+            }
+
+            Self::BG2PA_OFFSET => {
+                self.video.affine_background_mut(2).write_pa(value);
+                return;
+            }
+            Self::BG2PB_OFFSET => {
+                self.video.affine_background_mut(2).write_pb(value);
+                return;
+            }
+            Self::BG2PC_OFFSET => {
+                self.video.affine_background_mut(2).write_pc(value);
+                return;
+            }
+            Self::BG2PD_OFFSET => {
+                self.video.affine_background_mut(2).write_pd(value);
+                return;
+            }
+            Self::BG2X_L_OFFSET => {
+                self.video
+                    .affine_background_mut(2)
+                    .write_reference_x_low(value);
+                return;
+            }
+            Self::BG2X_H_OFFSET => {
+                self.video
+                    .affine_background_mut(2)
+                    .write_reference_x_high(value);
+                return;
+            }
+            Self::BG2Y_L_OFFSET => {
+                self.video
+                    .affine_background_mut(2)
+                    .write_reference_y_low(value);
+                return;
+            }
+            Self::BG2Y_H_OFFSET => {
+                self.video
+                    .affine_background_mut(2)
+                    .write_reference_y_high(value);
+                return;
+            }
+
+            Self::BG3PA_OFFSET => {
+                self.video.affine_background_mut(3).write_pa(value);
+                return;
+            }
+            Self::BG3PB_OFFSET => {
+                self.video.affine_background_mut(3).write_pb(value);
+                return;
+            }
+            Self::BG3PC_OFFSET => {
+                self.video.affine_background_mut(3).write_pc(value);
+                return;
+            }
+            Self::BG3PD_OFFSET => {
+                self.video.affine_background_mut(3).write_pd(value);
+                return;
+            }
+            Self::BG3X_L_OFFSET => {
+                self.video
+                    .affine_background_mut(3)
+                    .write_reference_x_low(value);
+                return;
+            }
+            Self::BG3X_H_OFFSET => {
+                self.video
+                    .affine_background_mut(3)
+                    .write_reference_x_high(value);
+                return;
+            }
+            Self::BG3Y_L_OFFSET => {
+                self.video
+                    .affine_background_mut(3)
+                    .write_reference_y_low(value);
+                return;
+            }
+            Self::BG3Y_H_OFFSET => {
+                self.video
+                    .affine_background_mut(3)
+                    .write_reference_y_high(value);
                 return;
             }
 
@@ -748,6 +922,30 @@ fn decode_timer_register(offset: u32) -> Option<(TimerIndex, TimerRegister)> {
 enum TimerRegister {
     Counter,
     Control,
+}
+
+const fn is_affine_video_register(offset: u32) -> bool {
+    matches!(
+        offset,
+        IoRegisters::BG2CNT_OFFSET
+            | IoRegisters::BG3CNT_OFFSET
+            | IoRegisters::BG2PA_OFFSET
+            | IoRegisters::BG2PB_OFFSET
+            | IoRegisters::BG2PC_OFFSET
+            | IoRegisters::BG2PD_OFFSET
+            | IoRegisters::BG2X_L_OFFSET
+            | IoRegisters::BG2X_H_OFFSET
+            | IoRegisters::BG2Y_L_OFFSET
+            | IoRegisters::BG2Y_H_OFFSET
+            | IoRegisters::BG3PA_OFFSET
+            | IoRegisters::BG3PB_OFFSET
+            | IoRegisters::BG3PC_OFFSET
+            | IoRegisters::BG3PD_OFFSET
+            | IoRegisters::BG3X_L_OFFSET
+            | IoRegisters::BG3X_H_OFFSET
+            | IoRegisters::BG3Y_L_OFFSET
+            | IoRegisters::BG3Y_H_OFFSET
+    )
 }
 
 const fn replace_byte(original: u16, high_byte: bool, value: u8) -> u16 {
@@ -1282,5 +1480,31 @@ mod tests {
         let result = io.tick(Ppu::HDRAW_CYCLES as u32);
 
         assert!(result.completed_visible_lines.contains(0),);
+    }
+    #[test]
+    fn affine_background_registers_are_mapped() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::BG2CNT_OFFSET, (1 << 8) | (1 << 13));
+        io.write16(IoRegisters::BG2PA_OFFSET, 0x0100);
+        io.write16(IoRegisters::BG2PB_OFFSET, 0xFF80);
+        io.write16(IoRegisters::BG2X_L_OFFSET, 0xFF00);
+        io.write16(IoRegisters::BG2X_H_OFFSET, 0x0FFF);
+
+        assert_eq!(io.read16(IoRegisters::BG2CNT_OFFSET), (1 << 8) | (1 << 13));
+        assert_eq!(io.read16(IoRegisters::BG2PA_OFFSET), 0x0100);
+        assert_eq!(io.read16(IoRegisters::BG2PB_OFFSET), 0xFF80);
+        assert_eq!(io.read16(IoRegisters::BG2X_L_OFFSET), 0xFF00);
+        assert_eq!(io.read16(IoRegisters::BG2X_H_OFFSET) & 0x0FFF, 0x0FFF);
+    }
+
+    #[test]
+    fn byte_writes_merge_affine_registers() {
+        let mut io = IoRegisters::new();
+
+        io.write8(IoRegisters::BG2PA_OFFSET, 0x34);
+        io.write8(IoRegisters::BG2PA_OFFSET + 1, 0x12);
+
+        assert_eq!(io.read16(IoRegisters::BG2PA_OFFSET), 0x1234);
     }
 }

@@ -30,8 +30,8 @@ pub use self::ppu::{DispStat, Ppu, PpuTickResult, VisibleScanlineIter, VisibleSc
 pub use self::timer::{TIMER_COUNT, Timer, TimerControl, TimerController, TimerIndex};
 
 pub use self::video::{
-    DisplayControl, FRAMEBUFFER_PIXEL_COUNT, Framebuffer, SCREEN_HEIGHT, SCREEN_WIDTH, Video,
-    VideoMode, bgr555_to_rgba8888,
+    AffineBackground, AffineBackgroundControl, DisplayControl, FRAMEBUFFER_PIXEL_COUNT,
+    Framebuffer, SCREEN_HEIGHT, SCREEN_WIDTH, Video, VideoMode, bgr555_to_rgba8888,
 };
 
 pub use self::waitstate::{AccessKind, AccessWidth, MemoryRegion, TimedAccess, WaitControl};
@@ -184,6 +184,23 @@ impl Bus {
     pub const REG_WAITCNT: u32 = IoRegisters::BASE + IoRegisters::WAITCNT_OFFSET;
 
     pub const REG_DISPCNT: u32 = IoRegisters::BASE + IoRegisters::DISPCNT_OFFSET;
+
+    pub const REG_BG2CNT: u32 = IoRegisters::BASE + IoRegisters::BG2CNT_OFFSET;
+    pub const REG_BG3CNT: u32 = IoRegisters::BASE + IoRegisters::BG3CNT_OFFSET;
+
+    pub const REG_BG2PA: u32 = IoRegisters::BASE + IoRegisters::BG2PA_OFFSET;
+    pub const REG_BG2PB: u32 = IoRegisters::BASE + IoRegisters::BG2PB_OFFSET;
+    pub const REG_BG2PC: u32 = IoRegisters::BASE + IoRegisters::BG2PC_OFFSET;
+    pub const REG_BG2PD: u32 = IoRegisters::BASE + IoRegisters::BG2PD_OFFSET;
+    pub const REG_BG2X: u32 = IoRegisters::BASE + IoRegisters::BG2X_L_OFFSET;
+    pub const REG_BG2Y: u32 = IoRegisters::BASE + IoRegisters::BG2Y_L_OFFSET;
+
+    pub const REG_BG3PA: u32 = IoRegisters::BASE + IoRegisters::BG3PA_OFFSET;
+    pub const REG_BG3PB: u32 = IoRegisters::BASE + IoRegisters::BG3PB_OFFSET;
+    pub const REG_BG3PC: u32 = IoRegisters::BASE + IoRegisters::BG3PC_OFFSET;
+    pub const REG_BG3PD: u32 = IoRegisters::BASE + IoRegisters::BG3PD_OFFSET;
+    pub const REG_BG3X: u32 = IoRegisters::BASE + IoRegisters::BG3X_L_OFFSET;
+    pub const REG_BG3Y: u32 = IoRegisters::BASE + IoRegisters::BG3Y_L_OFFSET;
 
     pub fn new() -> Self {
         Self {
@@ -583,11 +600,19 @@ impl Bus {
          */
         {
             let vram = self.vram.as_slice();
-
+            let palette = self.palette.as_slice();
             let video = self.io.video_mut();
 
+            /*
+             * VCOUNT wrapped from 227 to 0. Reload affine reference points
+             * before rendering the first visible scanline of the new frame.
+             */
+            if result.new_frames != 0 {
+                video.begin_frame();
+            }
+
             for line in result.completed_visible_lines.iter() {
-                video.render_scanline(line, vram);
+                video.render_scanline(line, vram, palette);
             }
 
             /*
