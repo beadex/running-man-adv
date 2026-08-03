@@ -5,6 +5,7 @@ mod dma;
 mod interrupt;
 mod io;
 mod memory;
+mod ppu;
 mod timer;
 
 pub use self::dma::{
@@ -15,6 +16,8 @@ pub use self::dma::{
 pub use self::interrupt::{InterruptController, InterruptSource};
 
 pub use self::io::IoRegisters;
+
+pub use self::ppu::{DispStat, Ppu, PpuTickResult};
 
 pub use self::timer::{TIMER_COUNT, Timer, TimerControl, TimerController, TimerIndex};
 
@@ -150,6 +153,10 @@ impl Bus {
     pub const REG_IF: u32 = IoRegisters::BASE + IoRegisters::IF_OFFSET;
 
     pub const REG_IME: u32 = IoRegisters::BASE + IoRegisters::IME_OFFSET;
+
+    pub const REG_DISPSTAT: u32 = IoRegisters::BASE + IoRegisters::DISPSTAT_OFFSET;
+
+    pub const REG_VCOUNT: u32 = IoRegisters::BASE + IoRegisters::VCOUNT_OFFSET;
 
     pub fn new() -> Self {
         Self {
@@ -494,7 +501,6 @@ impl Bus {
             final_source: source,
             final_destination: destination,
             transferred_units: request.count,
-            request_interrupt,
         });
 
         if request_interrupt {
@@ -568,7 +574,7 @@ fn advance_dma_address(address: u32, width: u32, control: DmaAddressControl, sou
 
 #[cfg(test)]
 mod tests {
-    use super::{Bus, BusLoadError, DmaChannelIndex, InterruptController, InterruptSource};
+    use super::{Bus, BusLoadError, DmaChannelIndex, InterruptController, InterruptSource, Ppu};
 
     #[test]
     fn bios_is_loaded_and_read_only() {
@@ -882,5 +888,43 @@ mod tests {
             bus.read16(Bus::REG_IF) & InterruptSource::Dma0.mask(),
             InterruptSource::Dma0.mask()
         );
+    }
+
+    #[test]
+    fn vblank_repeat_dma_runs_once_per_vblank_event() {
+        let mut bus = Bus::new();
+
+        bus.write16(0x0200_0100, 0x1111);
+
+        bus.write16(0x0200_0102, 0x2222);
+
+        bus.write32(Bus::REG_DMA0SAD, 0x0200_0100);
+
+        bus.write32(Bus::REG_DMA0DAD, 0x0300_0100);
+
+        bus.write16(Bus::REG_DMA0CNT_L, 1);
+
+        /*
+         * Repeat
+         * VBlank timing
+         * Enable
+         */
+        bus.write16(Bus::REG_DMA0CNT_H, (1 << 9) | (0b01 << 12) | (1 << 15));
+
+        assert!(bus.run_pending_dma().is_none());
+
+        /*
+         * Reach VBlank.
+         */
+        bus.tick(Ppu::CYCLES_PER_LINE as u32 * Ppu::VISIBLE_LINES as u32);
+
+        bus.run_pending_dma().unwrap();
+
+        assert_eq!(bus.read16(0x0300_0100), 0x1111,);
+
+        /*
+         * Repeat DMA stays enabled.
+         */
+        assert_ne!(bus.read16(Bus::REG_DMA0CNT_H) & (1 << 15), 0,);
     }
 }

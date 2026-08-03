@@ -1,6 +1,6 @@
 use super::{
-    DmaChannelIndex, DmaController, InterruptController, InterruptSource, TimerController,
-    TimerIndex,
+    DmaChannelIndex, DmaController, DmaStartTiming, InterruptController, InterruptSource, Ppu,
+    TimerController, TimerIndex,
 };
 
 #[derive(Debug, Clone)]
@@ -9,6 +9,7 @@ pub struct IoRegisters {
     interrupts: InterruptController,
     timers: TimerController,
     dma: DmaController,
+    ppu: Ppu,
 }
 
 impl IoRegisters {
@@ -51,12 +52,16 @@ impl IoRegisters {
     pub const IF_OFFSET: u32 = 0x0202;
     pub const IME_OFFSET: u32 = 0x0208;
 
+    pub const DISPSTAT_OFFSET: u32 = 0x0004;
+    pub const VCOUNT_OFFSET: u32 = 0x0006;
+
     pub fn new() -> Self {
         Self {
             raw: Box::new([0; Self::SIZE]),
             interrupts: InterruptController::new(),
             timers: TimerController::new(),
             dma: DmaController::new(),
+            ppu: Ppu::new(),
         }
     }
 
@@ -92,11 +97,45 @@ impl IoRegisters {
         &mut self.dma
     }
 
-    pub fn tick(&mut self, cycles: u32) {
-        let interrupt_requests = self.timers.tick(cycles);
+    pub const fn ppu(&self) -> &Ppu {
+        &self.ppu
+    }
 
-        if interrupt_requests != 0 {
-            self.interrupts.request_mask(interrupt_requests);
+    pub fn ppu_mut(&mut self) -> &mut Ppu {
+        &mut self.ppu
+    }
+
+    pub fn tick(&mut self, cycles: u32) {
+        /*
+         * Advance the PPU first so timing events can queue DMA requests.
+         */
+        let ppu_result = self.ppu.tick(cycles);
+
+        if ppu_result.hblank_starts != 0 {
+            self.dma
+                .trigger(DmaStartTiming::HBlank, ppu_result.hblank_starts);
+        }
+
+        if ppu_result.vblank_starts != 0 {
+            self.dma
+                .trigger(DmaStartTiming::VBlank, ppu_result.vblank_starts);
+        }
+
+        /*
+         * Merge PPU interrupt requests into IF.
+         */
+        if ppu_result.interrupt_requests != 0 {
+            self.interrupts.request_mask(ppu_result.interrupt_requests);
+        }
+
+        /*
+         * Advance timers independently using the same elapsed machine
+         * cycles.
+         */
+        let timer_interrupts = self.timers.tick(cycles);
+
+        if timer_interrupts != 0 {
+            self.interrupts.request_mask(timer_interrupts);
         }
     }
 
@@ -110,19 +149,25 @@ impl IoRegisters {
 
     pub fn reset(&mut self) {
         self.raw.fill(0);
+
         self.interrupts.reset();
         self.timers.reset();
+        self.dma.reset();
+        self.ppu.reset();
     }
 
     pub fn read8(&self, offset: u32) -> u8 {
         let aligned = offset & !1;
 
-        if decode_dma_register(aligned).is_some()
+        if matches!(
+            aligned,
+            Self::DISPSTAT_OFFSET
+                | Self::VCOUNT_OFFSET
+                | Self::IE_OFFSET
+                | Self::IF_OFFSET
+                | Self::IME_OFFSET
+        ) || decode_dma_register(aligned).is_some()
             || decode_timer_register(aligned).is_some()
-            || matches!(
-                aligned,
-                Self::IE_OFFSET | Self::IF_OFFSET | Self::IME_OFFSET
-            )
         {
             let value = self.read16(aligned);
 
@@ -139,6 +184,22 @@ impl IoRegisters {
     pub fn write8(&mut self, offset: u32, value: u8) {
         let aligned = offset & !1;
         let high_byte = offset & 1 != 0;
+
+        if aligned == Self::DISPSTAT_OFFSET {
+            let current = self.ppu.read_dispstat();
+
+            let updated = replace_byte(current, high_byte, value);
+
+            self.ppu.write_dispstat(updated);
+            return;
+        }
+
+        if aligned == Self::VCOUNT_OFFSET {
+            /*
+             * VCOUNT is read-only.
+             */
+            return;
+        }
 
         if let Some((channel, register)) = decode_dma_register(aligned) {
             let current = match register {
@@ -233,6 +294,18 @@ impl IoRegisters {
     pub fn read16(&self, offset: u32) -> u16 {
         let offset = offset & !1;
 
+        match offset {
+            Self::DISPSTAT_OFFSET => {
+                return self.ppu.read_dispstat();
+            }
+
+            Self::VCOUNT_OFFSET => {
+                return self.ppu.vcount();
+            }
+
+            _ => {}
+        }
+
         if let Some((channel, register)) = decode_dma_register(offset) {
             return match register {
                 DmaRegister::SourceLow => self.dma.read_source(channel) as u16,
@@ -279,6 +352,22 @@ impl IoRegisters {
 
     pub fn write16(&mut self, offset: u32, value: u16) {
         let offset = offset & !1;
+
+        match offset {
+            Self::DISPSTAT_OFFSET => {
+                self.ppu.write_dispstat(value);
+                return;
+            }
+
+            Self::VCOUNT_OFFSET => {
+                /*
+                 * VCOUNT is read-only.
+                 */
+                return;
+            }
+
+            _ => {}
+        }
 
         if let Some((channel, register)) = decode_dma_register(offset) {
             match register {
@@ -482,7 +571,7 @@ mod tests {
     use super::IoRegisters;
 
     use crate::bus::{
-        DmaChannelIndex, DmaTransferWidth, InterruptController, InterruptSource, TimerIndex,
+        DmaChannelIndex, DmaTransferWidth, InterruptController, InterruptSource, Ppu, TimerIndex,
     };
 
     #[test]
@@ -768,5 +857,81 @@ mod tests {
         assert_eq!(request.count, 4);
 
         assert_eq!(request.width, DmaTransferWidth::Word);
+    }
+
+    #[test]
+    fn dispstat_and_vcount_are_mapped() {
+        let mut io = IoRegisters::new();
+
+        /*
+         * HBlank IRQ enable, VCOUNT compare = 10.
+         */
+        io.write16(IoRegisters::DISPSTAT_OFFSET, (1 << 4) | (10 << 8));
+
+        assert_eq!(
+            io.read16(IoRegisters::DISPSTAT_OFFSET,) & ((1 << 4) | 0xFF00),
+            (1 << 4) | (10 << 8),
+        );
+
+        io.tick(Ppu::CYCLES_PER_LINE as u32 * 10);
+
+        assert_eq!(io.read16(IoRegisters::VCOUNT_OFFSET,), 10,);
+
+        assert_ne!(io.read16(IoRegisters::DISPSTAT_OFFSET,) & (1 << 2), 0,);
+    }
+
+    #[test]
+    fn hblank_sets_dispstat_status_bit() {
+        let mut io = IoRegisters::new();
+
+        io.tick(Ppu::HDRAW_CYCLES as u32);
+
+        assert_ne!(io.read16(IoRegisters::DISPSTAT_OFFSET,) & (1 << 1), 0,);
+    }
+
+    #[test]
+    fn hblank_event_queues_hblank_dma() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::DMA0CNT_L_OFFSET, 1);
+
+        io.write16(IoRegisters::DMA0CNT_H_OFFSET, (0b10 << 12) | (1 << 15));
+
+        assert!(io.dma_mut().next_pending_request().is_none());
+
+        io.tick(Ppu::HDRAW_CYCLES as u32);
+
+        let request = io.dma_mut().next_pending_request().unwrap();
+
+        assert_eq!(request.channel, DmaChannelIndex::Dma0,);
+    }
+
+    #[test]
+    fn vblank_event_queues_vblank_dma() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::DMA1CNT_L_OFFSET, 1);
+
+        io.write16(IoRegisters::DMA1CNT_H_OFFSET, (0b01 << 12) | (1 << 15));
+
+        io.tick(Ppu::CYCLES_PER_LINE as u32 * Ppu::VISIBLE_LINES as u32);
+
+        let request = io.dma_mut().next_pending_request().unwrap();
+
+        assert_eq!(request.channel, DmaChannelIndex::Dma1,);
+    }
+
+    #[test]
+    fn ppu_hblank_irq_sets_if() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::DISPSTAT_OFFSET, 1 << 4);
+
+        io.tick(Ppu::HDRAW_CYCLES as u32);
+
+        assert_ne!(
+            io.read16(IoRegisters::IF_OFFSET) & InterruptSource::HBlank.mask(),
+            0,
+        );
     }
 }

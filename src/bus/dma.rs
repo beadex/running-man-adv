@@ -227,7 +227,13 @@ pub struct DmaChannel {
     internal_destination: u32,
     internal_count: u32,
 
-    pending: bool,
+    /*
+     * Number of queued DMA activations.
+     *
+     * A counter is safer than bool if one peripheral tick crosses more
+     * than one HBlank event.
+     */
+    pending_count: u32,
 }
 
 impl DmaChannel {
@@ -242,7 +248,7 @@ impl DmaChannel {
             internal_destination: 0,
             internal_count: 0,
 
-            pending: false,
+            pending_count: 0,
         }
     }
 
@@ -263,7 +269,11 @@ impl DmaChannel {
     }
 
     pub const fn pending(self) -> bool {
-        self.pending
+        self.pending_count != 0
+    }
+
+    pub const fn pending_count(self) -> u32 {
+        self.pending_count
     }
 
     fn reset(&mut self) {
@@ -287,6 +297,8 @@ pub struct DmaTransferRequest {
     pub source_control: DmaAddressControl,
     pub destination_control: DmaAddressControl,
     pub irq_enabled: bool,
+    pub start_timing: DmaStartTiming,
+    pub repeat: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,7 +307,6 @@ pub struct DmaTransferCompletion {
     pub final_source: u32,
     pub final_destination: u32,
     pub transferred_units: u32,
-    pub request_interrupt: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,7 +366,9 @@ impl DmaController {
         let channel = &mut self.channels[index.as_usize()];
 
         let old_enabled = channel.control.enabled();
+
         let new_control = DmaControl::from_raw(value);
+
         let new_enabled = new_control.enabled();
 
         channel.control = new_control;
@@ -364,12 +377,12 @@ impl DmaController {
             Self::latch_channel(index, channel);
 
             if new_control.start_timing() == DmaStartTiming::Immediate {
-                channel.pending = true;
+                channel.pending_count = channel.pending_count.saturating_add(1);
             }
         }
 
         if old_enabled && !new_enabled {
-            channel.pending = false;
+            channel.pending_count = 0;
         }
     }
 
@@ -398,11 +411,11 @@ impl DmaController {
 
             let channel = &mut self.channels[channel_number];
 
-            if !channel.pending || !channel.control.enabled() {
+            if channel.pending_count == 0 || !channel.control.enabled() {
                 continue;
             }
 
-            channel.pending = false;
+            channel.pending_count -= 1;
 
             return Some(DmaTransferRequest {
                 channel: channel_index,
@@ -410,9 +423,24 @@ impl DmaController {
                 destination: channel.internal_destination,
                 count: channel.internal_count,
                 width: channel.control.transfer_width(),
-                source_control: channel.control.source_control(),
+
+                source_control: match channel.control.source_control() {
+                    /*
+                     * Source mode 3 is prohibited. Treat it deterministically as
+                     * increment until an explicit invalid-DMA policy is added.
+                     */
+                    DmaAddressControl::IncrementReload => DmaAddressControl::Increment,
+
+                    control => control,
+                },
+
                 destination_control: channel.control.destination_control(),
+
                 irq_enabled: channel.control.irq_enabled(),
+
+                start_timing: channel.control.start_timing(),
+
+                repeat: channel.control.repeat(),
             });
         }
 
@@ -420,22 +448,62 @@ impl DmaController {
     }
 
     pub fn complete_transfer(&mut self, completion: DmaTransferCompletion) {
-        let channel = &mut self.channels[completion.channel.as_usize()];
+        let index = completion.channel;
+        let channel = &mut self.channels[index.as_usize()];
+
+        let repeated_event_dma =
+            channel.control.repeat() && channel.control.start_timing() != DmaStartTiming::Immediate;
 
         channel.internal_source = completion.final_source;
 
-        channel.internal_destination = completion.final_destination;
+        if repeated_event_dma {
+            channel.internal_destination = match channel.control.destination_control() {
+                DmaAddressControl::IncrementReload => {
+                    channel.destination_register & index.destination_address_mask()
+                }
 
-        channel.internal_count = 0;
+                _ => completion.final_destination,
+            };
 
-        /*
-         * Immediate DMA always disables after completion.
-         *
-         * Repeat applies to event-triggered DMA and will be added
-         * when VBlank/HBlank/Special triggering exists.
-         */
-        channel.control.set_enabled(false);
-        channel.pending = false;
+            let encoded_count = channel.count_register & index.count_mask();
+
+            channel.internal_count = if encoded_count == 0 {
+                index.maximum_count()
+            } else {
+                encoded_count as u32
+            };
+
+            /*
+             * Enable remains set while waiting for another event.
+             *
+             * Do not clear pending_count: another HBlank/VBlank may have
+             * been queued while the previous transfer occupied the bus.
+             */
+        } else {
+            channel.internal_destination = completion.final_destination;
+
+            channel.internal_count = 0;
+            channel.control.set_enabled(false);
+            channel.pending_count = 0;
+        }
+    }
+
+    pub fn trigger(&mut self, timing: DmaStartTiming, occurrences: u32) {
+        if occurrences == 0 || timing == DmaStartTiming::Immediate {
+            return;
+        }
+
+        for channel in &mut self.channels {
+            if !channel.control.enabled() {
+                continue;
+            }
+
+            if channel.control.start_timing() != timing {
+                continue;
+            }
+
+            channel.pending_count = channel.pending_count.saturating_add(occurrences);
+        }
     }
 
     pub fn reset(&mut self) {
@@ -454,7 +522,8 @@ impl Default for DmaController {
 #[cfg(test)]
 mod tests {
     use super::{
-        DmaAddressControl, DmaChannelIndex, DmaController, DmaStartTiming, DmaTransferWidth,
+        DmaAddressControl, DmaChannelIndex, DmaController, DmaStartTiming, DmaTransferCompletion,
+        DmaTransferWidth,
     };
 
     #[test]
@@ -551,5 +620,123 @@ mod tests {
         dma.write_control(DmaChannelIndex::Dma0, (0b01 << 12) | (1 << 15));
 
         assert!(dma.next_pending_request().is_none());
+    }
+
+    #[test]
+    fn vblank_dma_becomes_pending_on_vblank_event() {
+        let mut dma = DmaController::new();
+
+        dma.write_count(DmaChannelIndex::Dma0, 4);
+
+        /*
+         * VBlank timing + enable.
+         */
+        dma.write_control(DmaChannelIndex::Dma0, (0b01 << 12) | (1 << 15));
+
+        assert!(dma.next_pending_request().is_none());
+
+        dma.trigger(DmaStartTiming::VBlank, 1);
+
+        let request = dma.next_pending_request().unwrap();
+
+        assert_eq!(request.channel, DmaChannelIndex::Dma0,);
+
+        assert_eq!(request.start_timing, DmaStartTiming::VBlank,);
+    }
+
+    #[test]
+    fn hblank_event_only_triggers_hblank_dma() {
+        let mut dma = DmaController::new();
+
+        dma.write_control(DmaChannelIndex::Dma0, (0b01 << 12) | (1 << 15));
+
+        dma.write_control(DmaChannelIndex::Dma1, (0b10 << 12) | (1 << 15));
+
+        dma.trigger(DmaStartTiming::HBlank, 1);
+
+        assert_eq!(
+            dma.next_pending_request().unwrap().channel,
+            DmaChannelIndex::Dma1,
+        );
+
+        assert!(dma.next_pending_request().is_none());
+    }
+
+    #[test]
+    fn repeat_event_dma_remains_enabled_after_completion() {
+        let mut dma = DmaController::new();
+
+        dma.write_source(DmaChannelIndex::Dma0, 0x0200_0000);
+
+        dma.write_destination(DmaChannelIndex::Dma0, 0x0300_0000);
+
+        dma.write_count(DmaChannelIndex::Dma0, 4);
+
+        /*
+         * Repeat + VBlank + enable.
+         */
+        dma.write_control(DmaChannelIndex::Dma0, (1 << 9) | (0b01 << 12) | (1 << 15));
+
+        dma.trigger(DmaStartTiming::VBlank, 1);
+
+        let request = dma.next_pending_request().unwrap();
+
+        dma.complete_transfer(DmaTransferCompletion {
+            channel: request.channel,
+            final_source: 0x0200_0008,
+            final_destination: 0x0300_0008,
+            transferred_units: 4,
+        });
+
+        assert!(dma.channel(DmaChannelIndex::Dma0).control().enabled());
+
+        dma.trigger(DmaStartTiming::VBlank, 1);
+
+        let second = dma.next_pending_request().unwrap();
+
+        assert_eq!(second.source, 0x0200_0008);
+        assert_eq!(second.destination, 0x0300_0008);
+        assert_eq!(second.count, 4);
+    }
+
+    #[test]
+    fn destination_increment_reload_restores_destination() {
+        let mut dma = DmaController::new();
+
+        dma.write_source(DmaChannelIndex::Dma0, 0x0200_0000);
+
+        dma.write_destination(DmaChannelIndex::Dma0, 0x0300_0000);
+
+        dma.write_count(DmaChannelIndex::Dma0, 4);
+
+        /*
+         * Destination increment/reload
+         * Repeat
+         * VBlank
+         * Enable
+         */
+        dma.write_control(
+            DmaChannelIndex::Dma0,
+            (0b11 << 5) | (1 << 9) | (0b01 << 12) | (1 << 15),
+        );
+
+        dma.trigger(DmaStartTiming::VBlank, 1);
+
+        let request = dma.next_pending_request().unwrap();
+
+        dma.complete_transfer(DmaTransferCompletion {
+            channel: request.channel,
+            final_source: 0x0200_0008,
+            final_destination: 0x0300_0008,
+            transferred_units: 4,
+        });
+
+        dma.trigger(DmaStartTiming::VBlank, 1);
+
+        let repeated = dma.next_pending_request().unwrap();
+
+        assert_eq!(repeated.source, 0x0200_0008,);
+
+        assert_eq!(repeated.destination, 0x0300_0000,);
     }
 }
