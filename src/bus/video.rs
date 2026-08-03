@@ -386,6 +386,7 @@ pub struct Video {
     bg2: AffineBackground,
     bg3: AffineBackground,
     framebuffer: Box<Framebuffer>,
+    object_line: Box<[Option<ObjectPixel>; SCREEN_WIDTH]>,
     frame_ready: bool,
     frame_number: u64,
 }
@@ -400,6 +401,7 @@ impl Video {
             bg2: AffineBackground::new(),
             bg3: AffineBackground::new(),
             framebuffer: Box::new([Self::UNIMPLEMENTED_MODE_PIXEL; FRAMEBUFFER_PIXEL_COUNT]),
+            object_line: Box::new([None; SCREEN_WIDTH]),
             frame_ready: false,
             frame_number: 0,
         }
@@ -503,14 +505,11 @@ impl Video {
         let backdrop = read_palette_color(palette, 0);
         let destination_start = line * SCREEN_WIDTH;
 
+        self.render_object_scanline(line, vram, palette, oam);
+
         for x in 0..SCREEN_WIDTH {
             let background = self.sample_mode2_background_pixel(x, vram, palette);
-            let object = if self.display_control.obj_enabled() {
-                sample_top_object_pixel(self.display_control, x, line, vram, palette, oam)
-            } else {
-                None
-            };
-
+            let object = self.object_line[x];
             let color = compose_background_and_object(background, object, backdrop);
 
             self.framebuffer[destination_start + x] = color;
@@ -565,6 +564,8 @@ impl Video {
         let destination_line_start = line * SCREEN_WIDTH;
         let bg_priority = self.bg2.control.priority();
 
+        self.render_object_scanline(line, vram, palette, oam);
+
         for x in 0..SCREEN_WIDTH {
             let source_offset = source_line_start + x * 2;
             let low = vram.get(source_offset).copied().unwrap_or(0);
@@ -575,14 +576,116 @@ impl Video {
                 layer: 2,
             };
 
-            let object = if self.display_control.obj_enabled() {
-                sample_top_object_pixel(self.display_control, x, line, vram, palette, oam)
-            } else {
-                None
+            self.framebuffer[destination_line_start + x] = compose_background_and_object(
+                Some(background),
+                self.object_line[x],
+                background.color,
+            );
+        }
+    }
+
+    fn render_object_scanline(
+        &mut self,
+        line: usize,
+        vram: &[u8],
+        palette: &[u8],
+        oam: &[u8],
+    ) {
+        self.object_line.fill(None);
+
+        if !self.display_control.obj_enabled() {
+            return;
+        }
+
+        /*
+         * Draw high OAM indices first so lower indices overwrite them,
+         * matching GBA OBJ-to-OBJ ordering.
+         */
+        for object_index in (0..128usize).rev() {
+            let Some(attributes) = read_object_attributes(oam, object_index) else {
+                continue;
             };
 
-            self.framebuffer[destination_line_start + x] =
-                compose_background_and_object(Some(background), object, background.color);
+            if attributes.disabled() || attributes.shape() == 3 || attributes.object_mode() >= 2 {
+                continue;
+            }
+
+            let Some((texture_width, texture_height)) =
+                object_dimensions(attributes.shape(), attributes.size())
+            else {
+                continue;
+            };
+
+            let display_width = if attributes.double_size() {
+                texture_width * 2
+            } else {
+                texture_width
+            };
+
+            let display_height = if attributes.double_size() {
+                texture_height * 2
+            } else {
+                texture_height
+            };
+
+            let object_y = attributes.y() as i32;
+            let local_y = ((line as i32 - object_y) & 0xFF) as i32;
+
+            if local_y >= display_height as i32 {
+                continue;
+            }
+
+            let object_x = sign_extend_object_x(attributes.x());
+            let start_x = object_x.max(0) as usize;
+            let end_x = (object_x + display_width as i32).min(SCREEN_WIDTH as i32).max(0) as usize;
+
+            for screen_x in start_x..end_x {
+                let local_x = screen_x as i32 - object_x;
+
+                let source = if attributes.affine() {
+                    affine_object_source_coordinates(
+                        attributes,
+                        local_x,
+                        local_y,
+                        texture_width,
+                        texture_height,
+                        display_width,
+                        display_height,
+                        oam,
+                    )
+                } else {
+                    regular_object_source_coordinates(
+                        attributes,
+                        local_x,
+                        local_y,
+                        texture_width,
+                        texture_height,
+                    )
+                };
+
+                let Some((source_x, source_y)) = source else {
+                    continue;
+                };
+
+                let Some(color) = sample_object_texel(
+                    self.display_control,
+                    attributes,
+                    source_x,
+                    source_y,
+                    texture_width,
+                    vram,
+                    palette,
+                ) else {
+                    continue;
+                };
+
+                self.object_line[screen_x] = Some(ObjectPixel {
+                    color,
+                    priority: attributes.priority(),
+                    oam_index: object_index as u8,
+                    semi_transparent: attributes.object_mode() == 1,
+                });
+            }
         }
     }
 
@@ -605,6 +708,7 @@ impl Video {
         self.bg2.reset();
         self.bg3.reset();
         self.framebuffer.fill(Self::UNIMPLEMENTED_MODE_PIXEL);
+        self.object_line.fill(None);
         self.frame_ready = false;
         self.frame_number = 0;
     }
@@ -689,120 +793,6 @@ fn compose_background_and_object(
         (None, Some(object)) => object.color,
         (None, None) => backdrop,
     }
-}
-
-fn sample_top_object_pixel(
-    display_control: DisplayControl,
-    screen_x: usize,
-    screen_y: usize,
-    vram: &[u8],
-    palette: &[u8],
-    oam: &[u8],
-) -> Option<ObjectPixel> {
-    /*
-     * OBJ-to-OBJ priority is determined by OAM index. OBJ0 is above OBJ1,
-     * regardless of the two-bit OBJ-to-BG priority field.
-     */
-    for object_index in 0..128usize {
-        let Some(attributes) = read_object_attributes(oam, object_index) else {
-            continue;
-        };
-
-        if attributes.disabled() || attributes.shape() == 3 {
-            continue;
-        }
-
-        /*
-         * OBJ mode 2 is OBJ-window and is not visible. Mode 3 is prohibited
-         * on GBA.
-         */
-        if attributes.object_mode() >= 2 {
-            continue;
-        }
-
-        let Some((texture_width, texture_height)) =
-            object_dimensions(attributes.shape(), attributes.size())
-        else {
-            continue;
-        };
-
-        let display_width = if attributes.double_size() {
-            texture_width * 2
-        } else {
-            texture_width
-        };
-
-        let display_height = if attributes.double_size() {
-            texture_height * 2
-        } else {
-            texture_height
-        };
-
-        let object_x = sign_extend_object_x(attributes.x());
-        let object_y = attributes.y() as i32;
-
-        let local_x = screen_x as i32 - object_x;
-
-        /*
-         * Y coordinates wrap in an 8-bit space. This also handles sprites
-         * positioned partly above the visible screen.
-         */
-        let local_y = ((screen_y as i32 - object_y) & 0xFF) as i32;
-
-        if local_x < 0
-            || local_x >= display_width as i32
-            || local_y < 0
-            || local_y >= display_height as i32
-        {
-            continue;
-        }
-
-        let source = if attributes.affine() {
-            affine_object_source_coordinates(
-                attributes,
-                local_x,
-                local_y,
-                texture_width,
-                texture_height,
-                display_width,
-                display_height,
-                oam,
-            )
-        } else {
-            regular_object_source_coordinates(
-                attributes,
-                local_x,
-                local_y,
-                texture_width,
-                texture_height,
-            )
-        };
-
-        let Some((source_x, source_y)) = source else {
-            continue;
-        };
-
-        let Some(color) = sample_object_texel(
-            display_control,
-            attributes,
-            source_x,
-            source_y,
-            texture_width,
-            vram,
-            palette,
-        ) else {
-            continue;
-        };
-
-        return Some(ObjectPixel {
-            color,
-            priority: attributes.priority(),
-            oam_index: object_index as u8,
-            semi_transparent: attributes.object_mode() == 1,
-        });
-    }
-
-    None
 }
 
 fn read_object_attributes(oam: &[u8], object_index: usize) -> Option<ObjectAttributes> {

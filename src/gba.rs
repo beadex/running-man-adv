@@ -104,6 +104,14 @@ impl Gba {
 
         let cycles = if let Some(dma_result) = self.bus.run_pending_dma() {
             dma_result.cycles
+        } else if self.cpu.is_halted() && !self.bus.halt_wake_requested() {
+            /*
+             * Advancing HALT one cycle at a time creates hundreds of
+             * thousands of host scheduler calls per emulated frame. A small
+             * bounded quantum preserves responsive interrupt sampling while
+             * removing most of that overhead.
+             */
+            32
         } else {
             self.cpu.step(&mut self.bus)
         };
