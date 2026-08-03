@@ -1809,7 +1809,7 @@ mod tests {
     #[test]
     fn mode4_rejects_obj_tiles_below_512() {
         let mut video = Video::new();
-        video.write_display_control(4 | (1 << 4) | (1 << 10) | (1 << 12));
+        video.write_display_control(4 | (1 << 6) | (1 << 10) | (1 << 12));
 
         let mut vram = vec![0u8; 0x18000];
         let mut palette = vec![0u8; 0x400];
@@ -1903,7 +1903,7 @@ mod tests {
 
         let entry = 1u16 | (1 << 10);
         vram[0x800..0x802].copy_from_slice(&entry.to_le_bytes());
-        vram[32 + 3] = 0x10;
+        vram[32 + 3] = 0x01;
         palette[2..4].copy_from_slice(&0x7C00u16.to_le_bytes());
 
         video.render_scanline(0, &vram, &palette, &oam);
