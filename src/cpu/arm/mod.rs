@@ -8,6 +8,8 @@ mod data_processing;
 mod data_processing_executor;
 mod decoder;
 mod executor;
+mod halfword_data_transfer;
+mod halfword_data_transfer_executor;
 mod instruction;
 mod instruction_decoder;
 mod multiply;
@@ -43,6 +45,16 @@ pub use self::data_processing_executor::{DataProcessingExecutionError, execute_d
 pub use self::decoder::{ArmCondition, ArmInstructionKind, classify, condition, condition_passed};
 
 pub use self::executor::{ArmExecutionError, execute_arm};
+
+pub use self::halfword_data_transfer::{
+    HalfwordDataTransferDecodeError, HalfwordDataTransferInstruction, HalfwordTransferKind,
+    HalfwordTransferOffset, decode_halfword_data_transfer,
+};
+
+pub use self::halfword_data_transfer_executor::{
+    HalfwordDataTransferExecutionError, HalfwordDataTransferExecutionResult,
+    execute_halfword_data_transfer,
+};
 
 pub use self::instruction::ArmInstruction;
 

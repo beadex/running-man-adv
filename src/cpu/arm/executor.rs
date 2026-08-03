@@ -2,8 +2,9 @@ use crate::{bus::Bus, cpu::Registers};
 
 use super::{
     ArmInstruction, BranchExchangeExecutionError, DataProcessingExecutionError,
-    SingleDataTransferExecutionError, execute_branch, execute_branch_exchange,
-    execute_data_processing, execute_multiply, execute_single_data_transfer,
+    HalfwordDataTransferExecutionError, SingleDataTransferExecutionError, execute_branch,
+    execute_branch_exchange, execute_data_processing, execute_halfword_data_transfer,
+    execute_multiply, execute_single_data_transfer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +12,8 @@ pub enum ArmExecutionError {
     DataProcessing(DataProcessingExecutionError),
 
     BranchExchange(BranchExchangeExecutionError),
+
+    HalfwordDataTransfer(HalfwordDataTransferExecutionError),
 
     SingleDataTransfer(SingleDataTransferExecutionError),
 
@@ -39,6 +42,12 @@ pub fn execute_arm(
             execute_branch_exchange(registers, *instruction)
                 .map(|_| ())
                 .map_err(ArmExecutionError::BranchExchange)
+        }
+
+        ArmInstruction::HalfwordDataTransfer(instruction) => {
+            execute_halfword_data_transfer(registers, bus, *instruction, instruction_address)
+                .map(|_| ())
+                .map_err(ArmExecutionError::HalfwordDataTransfer)
         }
 
         ArmInstruction::Multiply(instruction) => {

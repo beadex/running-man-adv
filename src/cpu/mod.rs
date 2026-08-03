@@ -505,4 +505,33 @@ mod tests {
 
         assert_eq!(cpu.registers().read(1), 0x0200_0104);
     }
+
+    #[test]
+    fn cpu_executes_strh_then_ldrsh() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * STRH  R1, [R0]
+         * LDRSH R2, [R0]
+         */
+        bus.write32(0x0200_0000, 0xE1C0_10B0);
+
+        bus.write32(0x0200_0004, 0xE1D0_20F0);
+
+        cpu.registers_mut().write(0, 0x0200_0100);
+
+        cpu.registers_mut().write(1, 0x0000_8001);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+
+        assert_eq!(bus.read16(0x0200_0100), 0x8001);
+
+        assert_eq!(cpu.registers().read(2), 0xFFFF_8001);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_0008);
+    }
 }

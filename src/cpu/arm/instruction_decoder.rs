@@ -1,7 +1,8 @@
 use super::{
     ArmInstruction, ArmInstructionKind, BranchDecodeError, BranchExchangeDecodeError,
-    DataProcessingDecodeError, MultiplyDecodeError, SingleDataTransferDecodeError, classify,
-    condition, decode_branch, decode_branch_exchange, decode_data_processing, decode_multiply,
+    DataProcessingDecodeError, HalfwordDataTransferDecodeError, MultiplyDecodeError,
+    SingleDataTransferDecodeError, classify, condition, decode_branch, decode_branch_exchange,
+    decode_data_processing, decode_halfword_data_transfer, decode_multiply,
     decode_single_data_transfer,
 };
 
@@ -10,6 +11,7 @@ pub enum ArmDecodeError {
     DataProcessing(DataProcessingDecodeError),
     Branch(BranchDecodeError),
     BranchExchange(BranchExchangeDecodeError),
+    HalfwordDataTransfer(HalfwordDataTransferDecodeError),
     Multiply(MultiplyDecodeError),
     SingleDataTransfer(SingleDataTransferDecodeError),
 }
@@ -39,6 +41,13 @@ pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
             Ok(ArmInstruction::BranchExchange(decoded))
         }
 
+        ArmInstructionKind::HalfwordDataTransfer => {
+            let decoded = decode_halfword_data_transfer(instruction)
+                .map_err(ArmDecodeError::HalfwordDataTransfer)?;
+
+            Ok(ArmInstruction::HalfwordDataTransfer(decoded))
+        }
+
         ArmInstructionKind::Multiply => {
             let decoded = decode_multiply(instruction).map_err(ArmDecodeError::Multiply)?;
 
@@ -58,11 +67,6 @@ pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
         }),
 
         ArmInstructionKind::SingleDataSwap => Ok(ArmInstruction::SingleDataSwap {
-            condition,
-            raw: instruction,
-        }),
-
-        ArmInstructionKind::HalfwordDataTransfer => Ok(ArmInstruction::HalfwordDataTransfer {
             condition,
             raw: instruction,
         }),
