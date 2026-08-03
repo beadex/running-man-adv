@@ -200,6 +200,10 @@ impl Bus {
     pub const REG_BG3HOFS: u32 = IoRegisters::BASE + IoRegisters::BG3HOFS_OFFSET;
     pub const REG_BG3VOFS: u32 = IoRegisters::BASE + IoRegisters::BG3VOFS_OFFSET;
 
+    pub const REG_BLDCNT: u32 = IoRegisters::BASE + IoRegisters::BLDCNT_OFFSET;
+    pub const REG_BLDALPHA: u32 = IoRegisters::BASE + IoRegisters::BLDALPHA_OFFSET;
+    pub const REG_BLDY: u32 = IoRegisters::BASE + IoRegisters::BLDY_OFFSET;
+
     pub const REG_BG2PA: u32 = IoRegisters::BASE + IoRegisters::BG2PA_OFFSET;
     pub const REG_BG2PB: u32 = IoRegisters::BASE + IoRegisters::BG2PB_OFFSET;
     pub const REG_BG2PC: u32 = IoRegisters::BASE + IoRegisters::BG2PC_OFFSET;

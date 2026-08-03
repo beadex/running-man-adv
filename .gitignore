@@ -1,3 +1,8 @@
 /target
 /firmware
 /roms
+
+*.gba
+*.bin
+*.zip
+*.txt

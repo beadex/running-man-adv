@@ -75,6 +75,10 @@ impl IoRegisters {
     pub const BG3HOFS_OFFSET: u32 = 0x001C;
     pub const BG3VOFS_OFFSET: u32 = 0x001E;
 
+    pub const BLDCNT_OFFSET: u32 = 0x0050;
+    pub const BLDALPHA_OFFSET: u32 = 0x0052;
+    pub const BLDY_OFFSET: u32 = 0x0054;
+
     pub const BG2PA_OFFSET: u32 = 0x0020;
     pub const BG2PB_OFFSET: u32 = 0x0022;
     pub const BG2PC_OFFSET: u32 = 0x0024;
@@ -287,6 +291,9 @@ impl IoRegisters {
                 | Self::BG2VOFS_OFFSET
                 | Self::BG3HOFS_OFFSET
                 | Self::BG3VOFS_OFFSET
+                | Self::BLDCNT_OFFSET
+                | Self::BLDALPHA_OFFSET
+                | Self::BLDY_OFFSET
                 | Self::BG2PA_OFFSET
                 | Self::BG2PB_OFFSET
                 | Self::BG2PC_OFFSET
@@ -513,6 +520,10 @@ impl IoRegisters {
             Self::BG3HOFS_OFFSET => return self.video.read_background_horizontal_offset(3),
             Self::BG3VOFS_OFFSET => return self.video.read_background_vertical_offset(3),
 
+            Self::BLDCNT_OFFSET => return self.video.read_blend_control(),
+            Self::BLDALPHA_OFFSET => return self.video.read_blend_alpha(),
+            Self::BLDY_OFFSET => return self.video.read_blend_brightness(),
+
             Self::BG2PA_OFFSET => return self.video.affine_background(2).read_pa(),
             Self::BG2PB_OFFSET => return self.video.affine_background(2).read_pb(),
             Self::BG2PC_OFFSET => return self.video.affine_background(2).read_pc(),
@@ -678,6 +689,19 @@ impl IoRegisters {
             }
             Self::BG3VOFS_OFFSET => {
                 self.video.write_background_vertical_offset(3, value);
+                return;
+            }
+
+            Self::BLDCNT_OFFSET => {
+                self.video.write_blend_control(value);
+                return;
+            }
+            Self::BLDALPHA_OFFSET => {
+                self.video.write_blend_alpha(value);
+                return;
+            }
+            Self::BLDY_OFFSET => {
+                self.video.write_blend_brightness(value);
                 return;
             }
 
@@ -1012,6 +1036,9 @@ const fn is_affine_video_register(offset: u32) -> bool {
             | IoRegisters::BG2VOFS_OFFSET
             | IoRegisters::BG3HOFS_OFFSET
             | IoRegisters::BG3VOFS_OFFSET
+            | IoRegisters::BLDCNT_OFFSET
+            | IoRegisters::BLDALPHA_OFFSET
+            | IoRegisters::BLDY_OFFSET
             | IoRegisters::BG2PA_OFFSET
             | IoRegisters::BG2PB_OFFSET
             | IoRegisters::BG2PC_OFFSET
@@ -1603,5 +1630,18 @@ mod tests {
         assert_eq!(io.read16(IoRegisters::BG1CNT_OFFSET), 0x5678);
         assert_eq!(io.read16(IoRegisters::BG0HOFS_OFFSET), 0x01FF);
         assert_eq!(io.read16(IoRegisters::BG0VOFS_OFFSET), 0x0123);
+    }
+
+    #[test]
+    fn blend_registers_are_mapped() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::BLDCNT_OFFSET, 0x3FFF);
+        io.write16(IoRegisters::BLDALPHA_OFFSET, 0x1F1F);
+        io.write16(IoRegisters::BLDY_OFFSET, 0x001F);
+
+        assert_eq!(io.read16(IoRegisters::BLDCNT_OFFSET), 0x3FFF);
+        assert_eq!(io.read16(IoRegisters::BLDALPHA_OFFSET), 0x1F1F);
+        assert_eq!(io.read16(IoRegisters::BLDY_OFFSET), 0x001F);
     }
 }

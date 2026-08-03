@@ -124,6 +124,124 @@ impl Default for DisplayControl {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendEffect {
+    None,
+    Alpha,
+    BrightnessIncrease,
+    BrightnessDecrease,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlendControl {
+    raw: u16,
+}
+
+impl BlendControl {
+    pub const WRITABLE_MASK: u16 = 0x3FFF;
+
+    pub const fn new() -> Self {
+        Self { raw: 0 }
+    }
+
+    pub const fn raw(self) -> u16 {
+        self.raw
+    }
+
+    pub fn write(&mut self, value: u16) {
+        self.raw = value & Self::WRITABLE_MASK;
+    }
+
+    pub const fn effect(self) -> BlendEffect {
+        match (self.raw >> 6) & 0b11 {
+            0 => BlendEffect::None,
+            1 => BlendEffect::Alpha,
+            2 => BlendEffect::BrightnessIncrease,
+            3 => BlendEffect::BrightnessDecrease,
+            _ => unreachable!(),
+        }
+    }
+
+    const fn first_target(self, layer: PixelLayer) -> bool {
+        self.raw & layer.target_mask() != 0
+    }
+
+    const fn second_target(self, layer: PixelLayer) -> bool {
+        self.raw & (layer.target_mask() << 8) != 0
+    }
+}
+
+impl Default for BlendControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlendAlpha {
+    raw: u16,
+}
+
+impl BlendAlpha {
+    pub const fn new() -> Self {
+        Self { raw: 0 }
+    }
+
+    pub const fn raw(self) -> u16 {
+        self.raw
+    }
+
+    pub fn write(&mut self, value: u16) {
+        self.raw = value & 0x1F1F;
+    }
+
+    pub const fn eva(self) -> u16 {
+        let value = self.raw & 0x1F;
+        if value > 16 { 16 } else { value }
+    }
+
+    pub const fn evb(self) -> u16 {
+        let value = (self.raw >> 8) & 0x1F;
+        if value > 16 { 16 } else { value }
+    }
+}
+
+impl Default for BlendAlpha {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlendBrightness {
+    raw: u16,
+}
+
+impl BlendBrightness {
+    pub const fn new() -> Self {
+        Self { raw: 0 }
+    }
+
+    pub const fn raw(self) -> u16 {
+        self.raw
+    }
+
+    pub fn write(&mut self, value: u16) {
+        self.raw = value & 0x001F;
+    }
+
+    pub const fn evy(self) -> u16 {
+        let value = self.raw & 0x1F;
+        if value > 16 { 16 } else { value }
+    }
+}
+
+impl Default for BlendBrightness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextBackgroundControl {
     raw: u16,
 }
@@ -415,6 +533,58 @@ impl Default for AffineBackground {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PixelLayer {
+    Bg0,
+    Bg1,
+    Bg2,
+    Bg3,
+    Obj,
+    Backdrop,
+}
+
+impl PixelLayer {
+    const fn target_mask(self) -> u16 {
+        match self {
+            Self::Bg0 => 1 << 0,
+            Self::Bg1 => 1 << 1,
+            Self::Bg2 => 1 << 2,
+            Self::Bg3 => 1 << 3,
+            Self::Obj => 1 << 4,
+            Self::Backdrop => 1 << 5,
+        }
+    }
+
+    const fn order(self) -> u8 {
+        match self {
+            Self::Obj => 0,
+            Self::Bg0 => 1,
+            Self::Bg1 => 2,
+            Self::Bg2 => 3,
+            Self::Bg3 => 4,
+            Self::Backdrop => 5,
+        }
+    }
+
+    const fn from_background_index(index: u8) -> Self {
+        match index {
+            0 => Self::Bg0,
+            1 => Self::Bg1,
+            2 => Self::Bg2,
+            3 => Self::Bg3,
+            _ => Self::Backdrop,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LayerPixel {
+    color: u32,
+    priority: u8,
+    layer: PixelLayer,
+    semi_transparent: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BackgroundPixel {
     color: u32,
     priority: u8,
@@ -506,6 +676,9 @@ pub struct Video {
     bg3: AffineBackground,
     framebuffer: Box<Framebuffer>,
     object_line: Box<[Option<ObjectPixel>; SCREEN_WIDTH]>,
+    blend_control: BlendControl,
+    blend_alpha: BlendAlpha,
+    blend_brightness: BlendBrightness,
     frame_ready: bool,
     frame_number: u64,
 }
@@ -522,6 +695,9 @@ impl Video {
             bg3: AffineBackground::new(),
             framebuffer: Box::new([Self::UNIMPLEMENTED_MODE_PIXEL; FRAMEBUFFER_PIXEL_COUNT]),
             object_line: Box::new([None; SCREEN_WIDTH]),
+            blend_control: BlendControl::new(),
+            blend_alpha: BlendAlpha::new(),
+            blend_brightness: BlendBrightness::new(),
             frame_ready: false,
             frame_number: 0,
         }
@@ -605,6 +781,30 @@ impl Video {
         }
     }
 
+    pub const fn read_blend_control(&self) -> u16 {
+        self.blend_control.raw()
+    }
+
+    pub fn write_blend_control(&mut self, value: u16) {
+        self.blend_control.write(value);
+    }
+
+    pub const fn read_blend_alpha(&self) -> u16 {
+        self.blend_alpha.raw()
+    }
+
+    pub fn write_blend_alpha(&mut self, value: u16) {
+        self.blend_alpha.write(value);
+    }
+
+    pub const fn read_blend_brightness(&self) -> u16 {
+        self.blend_brightness.raw()
+    }
+
+    pub fn write_blend_brightness(&mut self, value: u16) {
+        self.blend_brightness.write(value);
+    }
+
     pub fn framebuffer(&self) -> &[u32] {
         self.framebuffer.as_slice()
     }
@@ -668,29 +868,36 @@ impl Video {
         self.render_object_scanline(line, vram, palette, oam);
 
         for x in 0..SCREEN_WIDTH {
-            let mut top_background = None;
+            let mut candidates = [None; 6];
+            let mut count = 0usize;
 
             for background_index in 0..4usize {
                 if !self.display_control.background_enabled(background_index) {
                     continue;
                 }
 
-                let Some(candidate) = sample_text_background(
+                if let Some(background) = sample_text_background(
                     &self.text_backgrounds[background_index],
                     background_index,
                     x,
                     line,
                     vram,
                     palette,
-                ) else {
-                    continue;
-                };
-
-                top_background = choose_top_background(top_background, Some(candidate));
+                ) {
+                    candidates[count] = Some(layer_from_background(background));
+                    count += 1;
+                }
             }
 
-            self.framebuffer[destination_start + x] =
-                compose_background_and_object(top_background, self.object_line[x], backdrop);
+            if let Some(object) = self.object_line[x] {
+                candidates[count] = Some(layer_from_object(object));
+                count += 1;
+            }
+
+            candidates[count] = Some(backdrop_layer(backdrop));
+            count += 1;
+
+            self.framebuffer[destination_start + x] = self.compose_layers(&candidates[..count]);
         }
     }
 
@@ -701,11 +908,42 @@ impl Video {
         self.render_object_scanline(line, vram, palette, oam);
 
         for x in 0..SCREEN_WIDTH {
-            let background = self.sample_mode2_background_pixel(x, vram, palette);
-            let object = self.object_line[x];
-            let color = compose_background_and_object(background, object, backdrop);
+            let mut candidates = [None; 4];
+            let mut count = 0usize;
 
-            self.framebuffer[destination_start + x] = color;
+            if self.display_control.bg2_enabled() {
+                if let Some(color) = sample_affine_background(&self.bg2, x, vram, palette) {
+                    candidates[count] = Some(LayerPixel {
+                        color,
+                        priority: self.bg2.control.priority(),
+                        layer: PixelLayer::Bg2,
+                        semi_transparent: false,
+                    });
+                    count += 1;
+                }
+            }
+
+            if self.display_control.bg3_enabled() {
+                if let Some(color) = sample_affine_background(&self.bg3, x, vram, palette) {
+                    candidates[count] = Some(LayerPixel {
+                        color,
+                        priority: self.bg3.control.priority(),
+                        layer: PixelLayer::Bg3,
+                        semi_transparent: false,
+                    });
+                    count += 1;
+                }
+            }
+
+            if let Some(object) = self.object_line[x] {
+                candidates[count] = Some(layer_from_object(object));
+                count += 1;
+            }
+
+            candidates[count] = Some(backdrop_layer(backdrop));
+            count += 1;
+
+            self.framebuffer[destination_start + x] = self.compose_layers(&candidates[..count]);
         }
     }
 
@@ -756,6 +994,7 @@ impl Video {
         let source_line_start = line * SCREEN_WIDTH * 2;
         let destination_line_start = line * SCREEN_WIDTH;
         let bg_priority = self.bg2.control.priority();
+        let backdrop = read_palette_color(palette, 0);
 
         self.render_object_scanline(line, vram, palette, oam);
 
@@ -763,31 +1002,32 @@ impl Video {
             let source_offset = source_line_start + x * 2;
             let low = vram.get(source_offset).copied().unwrap_or(0);
             let high = vram.get(source_offset + 1).copied().unwrap_or(0);
-            let background = BackgroundPixel {
+
+            let mut candidates = [None; 3];
+            let mut count = 0usize;
+
+            candidates[count] = Some(LayerPixel {
                 color: bgr555_to_rgba8888(u16::from_le_bytes([low, high])),
                 priority: bg_priority,
-                layer: 2,
-            };
+                layer: PixelLayer::Bg2,
+                semi_transparent: false,
+            });
+            count += 1;
 
-            self.framebuffer[destination_line_start + x] = compose_background_and_object(
-                Some(background),
-                self.object_line[x],
-                background.color,
-            );
+            if let Some(object) = self.object_line[x] {
+                candidates[count] = Some(layer_from_object(object));
+                count += 1;
+            }
+
+            candidates[count] = Some(backdrop_layer(backdrop));
+            count += 1;
+
+            self.framebuffer[destination_line_start + x] =
+                self.compose_layers(&candidates[..count]);
         }
     }
 
     fn render_mode4_scanline(&mut self, line: usize, vram: &[u8], palette: &[u8], oam: &[u8]) {
-        /*
-         * Mode 4:
-         *
-         * 240 × 160
-         * 8-bit BG palette indices
-         * page 0 at VRAM 0x0000
-         * page 1 at VRAM 0xA000
-         *
-         * Palette index zero is a normal visible bitmap color.
-         */
         let page_base = if self.display_control.page_selected() {
             0xA000
         } else {
@@ -802,20 +1042,30 @@ impl Video {
         self.render_object_scanline(line, vram, palette, oam);
 
         for x in 0..SCREEN_WIDTH {
-            let background = if self.display_control.bg2_enabled() {
-                let palette_index = vram.get(source_line_start + x).copied().unwrap_or(0);
+            let mut candidates = [None; 3];
+            let mut count = 0usize;
 
-                Some(BackgroundPixel {
+            if self.display_control.bg2_enabled() {
+                let palette_index = vram.get(source_line_start + x).copied().unwrap_or(0);
+                candidates[count] = Some(LayerPixel {
                     color: read_palette_color(palette, palette_index),
                     priority: bg_priority,
-                    layer: 2,
-                })
-            } else {
-                None
-            };
+                    layer: PixelLayer::Bg2,
+                    semi_transparent: false,
+                });
+                count += 1;
+            }
+
+            if let Some(object) = self.object_line[x] {
+                candidates[count] = Some(layer_from_object(object));
+                count += 1;
+            }
+
+            candidates[count] = Some(backdrop_layer(backdrop));
+            count += 1;
 
             self.framebuffer[destination_line_start + x] =
-                compose_background_and_object(background, self.object_line[x], backdrop);
+                self.compose_layers(&candidates[..count]);
         }
     }
 
@@ -920,6 +1170,65 @@ impl Video {
         }
     }
 
+    fn compose_layers(&self, candidates: &[Option<LayerPixel>]) -> u32 {
+        let mut top: Option<LayerPixel> = None;
+
+        for candidate in candidates.iter().flatten().copied() {
+            if top.is_none() || layer_is_above(candidate, top.unwrap()) {
+                top = Some(candidate);
+            }
+        }
+
+        let top = top.expect("backdrop candidate must always exist");
+
+        /*
+         * Semi-transparent OBJ always attempts alpha blending, independent
+         * of BLDCNT effect mode. The lower pixel still has to be selected as
+         * a second target.
+         */
+        if top.layer == PixelLayer::Obj && top.semi_transparent {
+            if let Some(second) = find_second_target(candidates, top, self.blend_control) {
+                return blend_alpha_rgba(
+                    top.color,
+                    second.color,
+                    self.blend_alpha.eva(),
+                    self.blend_alpha.evb(),
+                );
+            }
+        }
+
+        match self.blend_control.effect() {
+            BlendEffect::Alpha => {
+                if self.blend_control.first_target(top.layer) {
+                    if let Some(second) = find_second_target(candidates, top, self.blend_control) {
+                        return blend_alpha_rgba(
+                            top.color,
+                            second.color,
+                            self.blend_alpha.eva(),
+                            self.blend_alpha.evb(),
+                        );
+                    }
+                }
+            }
+
+            BlendEffect::BrightnessIncrease => {
+                if self.blend_control.first_target(top.layer) {
+                    return brighten_rgba(top.color, self.blend_brightness.evy());
+                }
+            }
+
+            BlendEffect::BrightnessDecrease => {
+                if self.blend_control.first_target(top.layer) {
+                    return darken_rgba(top.color, self.blend_brightness.evy());
+                }
+            }
+
+            BlendEffect::None => {}
+        }
+
+        top.color
+    }
+
     fn advance_affine_scanline(&mut self) {
         self.bg2.advance_scanline();
         self.bg3.advance_scanline();
@@ -941,6 +1250,9 @@ impl Video {
         self.bg3.reset();
         self.framebuffer.fill(Self::UNIMPLEMENTED_MODE_PIXEL);
         self.object_line.fill(None);
+        self.blend_control = BlendControl::new();
+        self.blend_alpha = BlendAlpha::new();
+        self.blend_brightness = BlendBrightness::new();
         self.frame_ready = false;
         self.frame_number = 0;
     }
@@ -1096,27 +1408,99 @@ fn sample_affine_background(
     Some(read_palette_color(palette, palette_index))
 }
 
-fn compose_background_and_object(
-    background: Option<BackgroundPixel>,
-    object: Option<ObjectPixel>,
-    backdrop: u32,
-) -> u32 {
-    match (background, object) {
-        /*
-         * When OBJ and BG priorities are equal, OBJ is above BG.
-         */
-        (Some(background), Some(object)) => {
-            if object.priority <= background.priority {
-                object.color
-            } else {
-                background.color
-            }
+fn layer_from_background(pixel: BackgroundPixel) -> LayerPixel {
+    LayerPixel {
+        color: pixel.color,
+        priority: pixel.priority,
+        layer: PixelLayer::from_background_index(pixel.layer),
+        semi_transparent: false,
+    }
+}
+
+fn layer_from_object(pixel: ObjectPixel) -> LayerPixel {
+    LayerPixel {
+        color: pixel.color,
+        priority: pixel.priority,
+        layer: PixelLayer::Obj,
+        semi_transparent: pixel.semi_transparent,
+    }
+}
+
+fn backdrop_layer(color: u32) -> LayerPixel {
+    LayerPixel {
+        color,
+        priority: 4,
+        layer: PixelLayer::Backdrop,
+        semi_transparent: false,
+    }
+}
+
+fn layer_is_above(left: LayerPixel, right: LayerPixel) -> bool {
+    left.priority < right.priority
+        || (left.priority == right.priority && left.layer.order() < right.layer.order())
+}
+
+fn find_second_target(
+    candidates: &[Option<LayerPixel>],
+    top: LayerPixel,
+    blend_control: BlendControl,
+) -> Option<LayerPixel> {
+    let mut second: Option<LayerPixel> = None;
+
+    for candidate in candidates.iter().flatten().copied() {
+        if candidate == top || !blend_control.second_target(candidate.layer) {
+            continue;
         }
 
-        (Some(background), None) => background.color,
-        (None, Some(object)) => object.color,
-        (None, None) => backdrop,
+        if second.is_none() || layer_is_above(candidate, second.unwrap()) {
+            second = Some(candidate);
+        }
     }
+
+    second
+}
+
+fn rgba8888_to_bgr555(color: u32) -> u16 {
+    let red = ((color >> 16) & 0xFF) as u16 >> 3;
+    let green = ((color >> 8) & 0xFF) as u16 >> 3;
+    let blue = (color & 0xFF) as u16 >> 3;
+
+    red | (green << 5) | (blue << 10)
+}
+
+fn blend_alpha_rgba(first: u32, second: u32, eva: u16, evb: u16) -> u32 {
+    let first = rgba8888_to_bgr555(first);
+    let second = rgba8888_to_bgr555(second);
+
+    let blend = |shift: u16| {
+        let a = (first >> shift) & 0x1F;
+        let b = (second >> shift) & 0x1F;
+        ((a * eva + b * evb) >> 4).min(31)
+    };
+
+    bgr555_to_rgba8888(blend(0) | (blend(5) << 5) | (blend(10) << 10))
+}
+
+fn brighten_rgba(color: u32, evy: u16) -> u32 {
+    let color = rgba8888_to_bgr555(color);
+
+    let brighten = |shift: u16| {
+        let component = (color >> shift) & 0x1F;
+        component + (((31 - component) * evy) >> 4)
+    };
+
+    bgr555_to_rgba8888(brighten(0) | (brighten(5) << 5) | (brighten(10) << 10))
+}
+
+fn darken_rgba(color: u32, evy: u16) -> u32 {
+    let color = rgba8888_to_bgr555(color);
+
+    let darken = |shift: u16| {
+        let component = (color >> shift) & 0x1F;
+        component - ((component * evy) >> 4)
+    };
+
+    bgr555_to_rgba8888(darken(0) | (darken(5) << 5) | (darken(10) << 10))
 }
 
 fn read_object_attributes(oam: &[u8], object_index: usize) -> Option<ObjectAttributes> {
@@ -1339,8 +1723,18 @@ pub const fn bgr555_to_rgba8888(color: u16) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DisplayControl, SCREEN_HEIGHT, SCREEN_WIDTH, Video, VideoMode, bgr555_to_rgba8888,
+        DisplayControl, LayerPixel, PixelLayer, SCREEN_HEIGHT, SCREEN_WIDTH, Video, VideoMode,
+        bgr555_to_rgba8888,
     };
+
+    fn backdrop_layer(color: u32) -> LayerPixel {
+        LayerPixel {
+            color,
+            priority: 4,
+            layer: PixelLayer::Backdrop,
+            semi_transparent: false,
+        }
+    }
 
     #[test]
     fn display_control_decodes_mode() {
@@ -1949,5 +2343,157 @@ mod tests {
 
         video.render_scanline(0, &vram, &palette, &oam);
         assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+    }
+
+    #[test]
+    fn alpha_blends_first_and_second_targets() {
+        let mut video = Video::new();
+        video.write_blend_control((1 << 0) | (1 << 6) | (1 << 9));
+        video.write_blend_alpha(8 | (8 << 8));
+
+        let pixels = [
+            Some(LayerPixel {
+                color: bgr555_to_rgba8888(0x001F),
+                priority: 0,
+                layer: PixelLayer::Bg0,
+                semi_transparent: false,
+            }),
+            Some(LayerPixel {
+                color: bgr555_to_rgba8888(0x03E0),
+                priority: 1,
+                layer: PixelLayer::Bg1,
+                semi_transparent: false,
+            }),
+        ];
+
+        assert_eq!(video.compose_layers(&pixels), bgr555_to_rgba8888(0x01EF));
+    }
+
+    #[test]
+    fn alpha_uses_highest_visible_second_target() {
+        let mut video = Video::new();
+        video.write_blend_control((1 << 0) | (1 << 6) | (1 << 9) | (1 << 10));
+        video.write_blend_alpha(8 | (8 << 8));
+
+        let pixels = [
+            Some(LayerPixel {
+                color: bgr555_to_rgba8888(0x001F),
+                priority: 0,
+                layer: PixelLayer::Bg0,
+                semi_transparent: false,
+            }),
+            Some(LayerPixel {
+                color: bgr555_to_rgba8888(0x03E0),
+                priority: 2,
+                layer: PixelLayer::Bg1,
+                semi_transparent: false,
+            }),
+            Some(LayerPixel {
+                color: bgr555_to_rgba8888(0x7C00),
+                priority: 1,
+                layer: PixelLayer::Bg2,
+                semi_transparent: false,
+            }),
+        ];
+
+        assert_eq!(video.compose_layers(&pixels), bgr555_to_rgba8888(0x3C0F));
+    }
+
+    #[test]
+    fn non_target_top_pixel_is_not_modified() {
+        let mut video = Video::new();
+        video.write_blend_control((1 << 1) | (1 << 6) | (1 << 9));
+        video.write_blend_alpha(8 | (8 << 8));
+
+        let red = bgr555_to_rgba8888(0x001F);
+        let pixels = [
+            Some(LayerPixel {
+                color: red,
+                priority: 0,
+                layer: PixelLayer::Bg0,
+                semi_transparent: false,
+            }),
+            Some(LayerPixel {
+                color: bgr555_to_rgba8888(0x03E0),
+                priority: 1,
+                layer: PixelLayer::Bg1,
+                semi_transparent: false,
+            }),
+        ];
+
+        assert_eq!(video.compose_layers(&pixels), red);
+    }
+
+    #[test]
+    fn brightness_increase_and_decrease_are_applied_in_bgr555() {
+        let mut video = Video::new();
+        let gray = bgr555_to_rgba8888(0x4210);
+        let pixels = [Some(LayerPixel {
+            color: gray,
+            priority: 0,
+            layer: PixelLayer::Bg0,
+            semi_transparent: false,
+        })];
+
+        video.write_blend_control((1 << 0) | (2 << 6));
+        video.write_blend_brightness(8);
+        assert_eq!(video.compose_layers(&pixels), bgr555_to_rgba8888(0x5EF7));
+
+        video.write_blend_control((1 << 0) | (3 << 6));
+        assert_eq!(video.compose_layers(&pixels), bgr555_to_rgba8888(0x2108));
+    }
+
+    #[test]
+    fn blend_coefficients_are_clamped_to_sixteen() {
+        let mut video = Video::new();
+        video.write_blend_alpha(31 | (31 << 8));
+        video.write_blend_brightness(31);
+
+        assert_eq!(video.blend_alpha.eva(), 16);
+        assert_eq!(video.blend_alpha.evb(), 16);
+        assert_eq!(video.blend_brightness.evy(), 16);
+    }
+
+    #[test]
+    fn semi_transparent_obj_forces_alpha_with_second_target() {
+        let mut video = Video::new();
+        video.write_blend_control(1 << 8);
+        video.write_blend_alpha(8 | (8 << 8));
+
+        let pixels = [
+            Some(LayerPixel {
+                color: bgr555_to_rgba8888(0x001F),
+                priority: 0,
+                layer: PixelLayer::Obj,
+                semi_transparent: true,
+            }),
+            Some(LayerPixel {
+                color: bgr555_to_rgba8888(0x03E0),
+                priority: 0,
+                layer: PixelLayer::Bg0,
+                semi_transparent: false,
+            }),
+        ];
+
+        assert_eq!(video.compose_layers(&pixels), bgr555_to_rgba8888(0x01EF));
+    }
+
+    #[test]
+    fn backdrop_can_be_second_target() {
+        let mut video = Video::new();
+        video.write_blend_control((1 << 0) | (1 << 6) | (1 << 13));
+        video.write_blend_alpha(8 | (8 << 8));
+
+        let pixels = [
+            Some(LayerPixel {
+                color: bgr555_to_rgba8888(0x001F),
+                priority: 0,
+                layer: PixelLayer::Bg0,
+                semi_transparent: false,
+            }),
+            Some(backdrop_layer(bgr555_to_rgba8888(0x7C00))),
+        ];
+
+        assert_eq!(video.compose_layers(&pixels), bgr555_to_rgba8888(0x3C0F));
     }
 }
