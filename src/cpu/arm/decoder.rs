@@ -17,6 +17,9 @@ pub enum ArmInstructionKind {
     /// STRH / LDRH / LDRSB / LDRSH
     HalfwordDataTransfer,
 
+    /// MRS / MSR
+    StatusRegister,
+
     /// ALU and logical operations.
     ///
     /// Examples:
@@ -165,6 +168,8 @@ pub const fn classify(instruction: u32) -> ArmInstructionKind {
         ArmInstructionKind::SingleDataSwap
     } else if is_halfword_data_transfer(instruction) {
         ArmInstructionKind::HalfwordDataTransfer
+    } else if is_status_register_instruction(instruction) {
+        return ArmInstructionKind::StatusRegister;
     } else {
         classify_major_group(instruction)
     }
@@ -286,6 +291,16 @@ const fn is_halfword_data_transfer(instruction: u32) -> bool {
     let transfer_type = (instruction >> 5) & 0b11;
 
     bits_27_25_are_zero && bits_7_and_4_are_set && transfer_type != 0
+}
+
+const fn is_status_register_instruction(instruction: u32) -> bool {
+    let mrs = instruction & 0x0FBF_0FFF == 0x010F_0000;
+
+    let msr_register = instruction & 0x0FB0_FFF0 == 0x0120_F000;
+
+    let msr_immediate = instruction & 0x0FB0_F000 == 0x0320_F000;
+
+    mrs || msr_register || msr_immediate
 }
 
 const fn bit(index: u32) -> u32 {

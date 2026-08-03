@@ -1,11 +1,13 @@
 pub mod arm;
 mod cpsr;
+mod mode;
 mod registers;
 
 use crate::bus::Bus;
 
-pub use cpsr::Cpsr;
-pub use registers::Registers;
+pub use self::cpsr::Cpsr;
+pub use self::mode::{CpuMode, InvalidCpuMode};
+pub use self::registers::{Registers, SpsrAccessError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuState {

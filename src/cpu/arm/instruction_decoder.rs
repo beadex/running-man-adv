@@ -1,10 +1,10 @@
 use super::{
     ArmInstruction, ArmInstructionKind, BlockDataTransferDecodeError, BranchDecodeError,
     BranchExchangeDecodeError, DataProcessingDecodeError, HalfwordDataTransferDecodeError,
-    MultiplyDecodeError, MultiplyLongDecodeError, SingleDataTransferDecodeError, classify,
-    condition, decode_block_data_transfer, decode_branch, decode_branch_exchange,
-    decode_data_processing, decode_halfword_data_transfer, decode_multiply, decode_multiply_long,
-    decode_single_data_transfer,
+    MultiplyDecodeError, MultiplyLongDecodeError, SingleDataTransferDecodeError,
+    StatusRegisterDecodeError, classify, condition, decode_block_data_transfer, decode_branch,
+    decode_branch_exchange, decode_data_processing, decode_halfword_data_transfer, decode_multiply,
+    decode_multiply_long, decode_single_data_transfer, decode_status_register,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +17,7 @@ pub enum ArmDecodeError {
     Multiply(MultiplyDecodeError),
     MultiplyLong(MultiplyLongDecodeError),
     SingleDataTransfer(SingleDataTransferDecodeError),
+    StatusRegister(StatusRegisterDecodeError),
 }
 
 pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
@@ -76,6 +77,13 @@ pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
                 .map_err(ArmDecodeError::SingleDataTransfer)?;
 
             Ok(ArmInstruction::SingleDataTransfer(decoded))
+        }
+
+        ArmInstructionKind::StatusRegister => {
+            let decoded =
+                decode_status_register(instruction).map_err(ArmDecodeError::StatusRegister)?;
+
+            Ok(ArmInstruction::StatusRegister(decoded))
         }
 
         ArmInstructionKind::SingleDataSwap => Ok(ArmInstruction::SingleDataSwap {

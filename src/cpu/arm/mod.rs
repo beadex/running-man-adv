@@ -20,6 +20,8 @@ mod multiply_long;
 mod multiply_long_executor;
 mod single_data_transfer;
 mod single_data_transfer_executor;
+mod status_register;
+mod status_register_executor;
 
 pub use self::alu::{AddResult, AluFlags, add_with_carry, arithmetic_shift_flags, logical_flags};
 
@@ -94,3 +96,10 @@ pub use self::single_data_transfer_executor::{
     SingleDataTransferExecutionError, SingleDataTransferExecutionResult,
     execute_single_data_transfer,
 };
+
+pub use self::status_register::{
+    ProgramStatusRegister, StatusRegisterDecodeError, StatusRegisterInstruction,
+    StatusRegisterMask, StatusRegisterOperand, decode_status_register,
+};
+
+pub use self::status_register_executor::{StatusRegisterExecutionError, execute_status_register};
