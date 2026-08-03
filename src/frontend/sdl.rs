@@ -44,6 +44,7 @@ const WINDOW_WIDTH: u32 = SCREEN_WIDTH as u32 * DEFAULT_SCALE;
 
 const WINDOW_HEIGHT: u32 = SCREEN_HEIGHT as u32 * DEFAULT_SCALE;
 
+#[cfg(feature = "cpu-trace")]
 const DEBUG_INTERVAL_CYCLES: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +166,8 @@ pub fn run(mut gba: Gba) -> Result<()> {
     let mut texture_pixels = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * size_of::<u32>()];
 
     let mut paused = false;
+
+    #[cfg(feature = "cpu-trace")]
     let mut next_debug_cycle = DEBUG_INTERVAL_CYCLES;
 
     /*
@@ -210,6 +213,7 @@ pub fn run(mut gba: Gba) -> Result<()> {
                     break;
                 }
 
+                #[cfg(feature = "cpu-trace")]
                 if gba.elapsed_cycles() >= next_debug_cycle {
                     log_emulator_state(&gba);
 
