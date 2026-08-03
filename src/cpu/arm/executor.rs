@@ -1,17 +1,18 @@
 use crate::{bus::Bus, cpu::Registers};
 
 use super::{
-    ArmInstruction, BranchExchangeExecutionError, DataProcessingExecutionError,
-    HalfwordDataTransferExecutionError, SingleDataTransferExecutionError, execute_branch,
+    ArmInstruction, BlockDataTransferExecutionError, BranchExchangeExecutionError,
+    DataProcessingExecutionError, HalfwordDataTransferExecutionError,
+    SingleDataTransferExecutionError, execute_block_data_transfer, execute_branch,
     execute_branch_exchange, execute_data_processing, execute_halfword_data_transfer,
     execute_multiply, execute_single_data_transfer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmExecutionError {
-    DataProcessing(DataProcessingExecutionError),
-
+    BlockDataTransfer(BlockDataTransferExecutionError),
     BranchExchange(BranchExchangeExecutionError),
+    DataProcessing(DataProcessingExecutionError),
 
     HalfwordDataTransfer(HalfwordDataTransferExecutionError),
 
@@ -27,9 +28,10 @@ pub fn execute_arm(
     instruction_address: u32,
 ) -> Result<(), ArmExecutionError> {
     match instruction {
-        ArmInstruction::DataProcessing(instruction) => {
-            execute_data_processing(registers, *instruction)
-                .map_err(ArmExecutionError::DataProcessing)
+        ArmInstruction::BlockDataTransfer(instruction) => {
+            execute_block_data_transfer(registers, bus, *instruction, instruction_address)
+                .map(|_| ())
+                .map_err(ArmExecutionError::BlockDataTransfer)
         }
 
         ArmInstruction::Branch(instruction) => {
@@ -42,6 +44,10 @@ pub fn execute_arm(
             execute_branch_exchange(registers, *instruction)
                 .map(|_| ())
                 .map_err(ArmExecutionError::BranchExchange)
+        }
+        ArmInstruction::DataProcessing(instruction) => {
+            execute_data_processing(registers, *instruction)
+                .map_err(ArmExecutionError::DataProcessing)
         }
 
         ArmInstruction::HalfwordDataTransfer(instruction) => {

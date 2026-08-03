@@ -1,5 +1,7 @@
 mod alu;
 mod barrel_shifter;
+mod block_data_transfer;
+mod block_data_transfer_executor;
 mod branch;
 mod branch_exchange;
 mod branch_exchange_executor;
@@ -21,6 +23,15 @@ pub use self::alu::{AddResult, AluFlags, add_with_carry, arithmetic_shift_flags,
 
 pub use self::barrel_shifter::{
     ShiftResult, expand_rotated_immediate, shift_immediate, shift_register,
+};
+
+pub use self::block_data_transfer::{
+    BlockAddressingMode, BlockDataTransferDecodeError, BlockDataTransferInstruction, RegisterList,
+    decode_block_data_transfer,
+};
+
+pub use self::block_data_transfer_executor::{
+    BlockDataTransferExecutionError, BlockDataTransferExecutionResult, execute_block_data_transfer,
 };
 
 pub use self::branch::{BranchDecodeError, BranchInstruction, decode_branch};

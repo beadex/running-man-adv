@@ -534,4 +534,57 @@ mod tests {
 
         assert_eq!(cpu.registers().pc(), 0x0200_0008);
     }
+
+    #[test]
+    fn cpu_executes_arm_push_and_pop_sequence() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * 0x02000000:
+         * STMDB SP!, {R4, R5, LR}
+         *
+         * 0x02000004:
+         * LDMIA SP!, {R4, R5, PC}
+         */
+        bus.write32(0x0200_0000, 0xE92D_4030);
+
+        bus.write32(0x0200_0004, 0xE8BD_8030);
+
+        cpu.registers_mut().write(Registers::SP, 0x0300_8000);
+
+        cpu.registers_mut().write(4, 0x4444_4444);
+
+        cpu.registers_mut().write(5, 0x5555_5555);
+
+        cpu.registers_mut().write(Registers::LR, 0x0200_0100);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        /*
+         * Push.
+         */
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(Registers::SP), 0x0300_7FF4);
+
+        /*
+         * Destroy the source registers to prove that pop restores them.
+         */
+        cpu.registers_mut().write(4, 0);
+        cpu.registers_mut().write(5, 0);
+
+        /*
+         * Pop.
+         */
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(4), 0x4444_4444);
+
+        assert_eq!(cpu.registers().read(5), 0x5555_5555);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_0100);
+
+        assert_eq!(cpu.registers().read(Registers::SP), 0x0300_8000);
+    }
 }

@@ -1,16 +1,17 @@
 use super::{
-    ArmInstruction, ArmInstructionKind, BranchDecodeError, BranchExchangeDecodeError,
-    DataProcessingDecodeError, HalfwordDataTransferDecodeError, MultiplyDecodeError,
-    SingleDataTransferDecodeError, classify, condition, decode_branch, decode_branch_exchange,
-    decode_data_processing, decode_halfword_data_transfer, decode_multiply,
-    decode_single_data_transfer,
+    ArmInstruction, ArmInstructionKind, BlockDataTransferDecodeError, BranchDecodeError,
+    BranchExchangeDecodeError, DataProcessingDecodeError, HalfwordDataTransferDecodeError,
+    MultiplyDecodeError, SingleDataTransferDecodeError, classify, condition,
+    decode_block_data_transfer, decode_branch, decode_branch_exchange, decode_data_processing,
+    decode_halfword_data_transfer, decode_multiply, decode_single_data_transfer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmDecodeError {
-    DataProcessing(DataProcessingDecodeError),
+    BlockDataTransfer(BlockDataTransferDecodeError),
     Branch(BranchDecodeError),
     BranchExchange(BranchExchangeDecodeError),
+    DataProcessing(DataProcessingDecodeError),
     HalfwordDataTransfer(HalfwordDataTransferDecodeError),
     Multiply(MultiplyDecodeError),
     SingleDataTransfer(SingleDataTransferDecodeError),
@@ -21,11 +22,11 @@ pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
     let kind = classify(instruction);
 
     match kind {
-        ArmInstructionKind::DataProcessing => {
-            let decoded =
-                decode_data_processing(instruction).map_err(ArmDecodeError::DataProcessing)?;
+        ArmInstructionKind::BlockDataTransfer => {
+            let decoded = decode_block_data_transfer(instruction)
+                .map_err(ArmDecodeError::BlockDataTransfer)?;
 
-            Ok(ArmInstruction::DataProcessing(decoded))
+            Ok(ArmInstruction::BlockDataTransfer(decoded))
         }
 
         ArmInstructionKind::Branch => {
@@ -39,6 +40,13 @@ pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
                 decode_branch_exchange(instruction).map_err(ArmDecodeError::BranchExchange)?;
 
             Ok(ArmInstruction::BranchExchange(decoded))
+        }
+
+        ArmInstructionKind::DataProcessing => {
+            let decoded =
+                decode_data_processing(instruction).map_err(ArmDecodeError::DataProcessing)?;
+
+            Ok(ArmInstruction::DataProcessing(decoded))
         }
 
         ArmInstructionKind::HalfwordDataTransfer => {
@@ -67,11 +75,6 @@ pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
         }),
 
         ArmInstructionKind::SingleDataSwap => Ok(ArmInstruction::SingleDataSwap {
-            condition,
-            raw: instruction,
-        }),
-
-        ArmInstructionKind::BlockDataTransfer => Ok(ArmInstruction::BlockDataTransfer {
             condition,
             raw: instruction,
         }),
@@ -226,5 +229,32 @@ mod tests {
                 rm: 1,
             })
         );
+    }
+
+    #[test]
+    fn decodes_typed_block_data_transfer() {
+        /*
+         * STMDB SP!, {R4-R7, LR}
+         */
+        let instruction = decode_arm(0xE92D_40F0).unwrap();
+
+        match instruction {
+            ArmInstruction::BlockDataTransfer(decoded) => {
+                assert!(!decoded.load);
+                assert!(decoded.write_back);
+                assert_eq!(decoded.rn, 13);
+
+                assert_eq!(
+                    decoded.addressing_mode,
+                    crate::cpu::arm::BlockAddressingMode::DecrementBefore
+                );
+
+                assert!(decoded.registers.contains(14));
+            }
+
+            other => {
+                panic!("expected block data transfer, got {other:?}");
+            }
+        }
     }
 }
