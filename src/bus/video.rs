@@ -495,6 +495,7 @@ impl Video {
         match self.display_control.mode() {
             VideoMode::Mode2 => self.render_mode2_scanline(line, vram, palette, oam),
             VideoMode::Mode3 => self.render_mode3_scanline(line, vram, palette, oam),
+            VideoMode::Mode4 => self.render_mode4_scanline(line, vram, palette, oam),
             _ => self.fill_scanline(line, Self::UNIMPLEMENTED_MODE_PIXEL),
         }
 
@@ -581,6 +582,57 @@ impl Video {
                 self.object_line[x],
                 background.color,
             );
+        }
+    }
+
+    fn render_mode4_scanline(
+        &mut self,
+        line: usize,
+        vram: &[u8],
+        palette: &[u8],
+        oam: &[u8],
+    ) {
+        /*
+         * Mode 4:
+         *
+         * 240 × 160
+         * 8-bit BG palette indices
+         * page 0 at VRAM 0x0000
+         * page 1 at VRAM 0xA000
+         *
+         * Palette index zero is a normal visible bitmap color.
+         */
+        let page_base = if self.display_control.page_selected() {
+            0xA000
+        } else {
+            0
+        };
+
+        let source_line_start = page_base + line * SCREEN_WIDTH;
+        let destination_line_start = line * SCREEN_WIDTH;
+        let backdrop = read_palette_color(palette, 0);
+        let bg_priority = self.bg2.control.priority();
+
+        self.render_object_scanline(line, vram, palette, oam);
+
+        for x in 0..SCREEN_WIDTH {
+            let background = if self.display_control.bg2_enabled() {
+                let palette_index = vram
+                    .get(source_line_start + x)
+                    .copied()
+                    .unwrap_or(0);
+
+                Some(BackgroundPixel {
+                    color: read_palette_color(palette, palette_index),
+                    priority: bg_priority,
+                    layer: 2,
+                })
+            } else {
+                None
+            };
+
+            self.framebuffer[destination_line_start + x] =
+                compose_background_and_object(background, self.object_line[x], backdrop);
         }
     }
 
@@ -1384,4 +1436,150 @@ mod tests {
 
         assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
     }
+    #[test]
+    fn mode4_renders_page_zero_with_bg_palette() {
+        let mut video = Video::new();
+        video.write_display_control(4 | (1 << 10));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let oam = vec![0u8; 0x400];
+
+        vram[0] = 1;
+        vram[1] = 2;
+        palette[2..4].copy_from_slice(&0x001Fu16.to_le_bytes());
+        palette[4..6].copy_from_slice(&0x03E0u16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+        assert_eq!(video.framebuffer()[1], 0xFF00_FF00);
+    }
+
+    #[test]
+    fn mode4_selects_page_one() {
+        let mut video = Video::new();
+        video.write_display_control(4 | (1 << 4) | (1 << 10));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let oam = vec![0u8; 0x400];
+
+        vram[0] = 1;
+        vram[0xA000] = 2;
+        palette[2..4].copy_from_slice(&0x001Fu16.to_le_bytes());
+        palette[4..6].copy_from_slice(&0x7C00u16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFF00_00FF);
+    }
+
+    #[test]
+    fn mode4_palette_zero_is_visible() {
+        let mut video = Video::new();
+        video.write_display_control(4 | (1 << 10));
+
+        let vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let oam = vec![0u8; 0x400];
+
+        palette[0..2].copy_from_slice(&0x03E0u16.to_le_bytes());
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFF00_FF00);
+    }
+
+    #[test]
+    fn mode4_uses_correct_last_pixel_address() {
+        let mut video = Video::new();
+        video.write_display_control(4 | (1 << 10));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let oam = vec![0u8; 0x400];
+
+        let line = SCREEN_HEIGHT - 1;
+        let x = SCREEN_WIDTH - 1;
+        vram[line * SCREEN_WIDTH + x] = 1;
+        palette[2..4].copy_from_slice(&0x7FFFu16.to_le_bytes());
+
+        video.render_scanline(line as u16, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[line * SCREEN_WIDTH + x], 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn mode4_composes_obj_using_bg2_priority() {
+        let mut video = Video::new();
+        video.write_display_control(4 | (1 << 4) | (1 << 10) | (1 << 12));
+        video.affine_background_mut(2).write_control(2);
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let mut oam = vec![0u8; 0x400];
+
+        vram[0] = 1;
+        palette[2..4].copy_from_slice(&0x03E0u16.to_le_bytes());
+
+        oam[0..2].copy_from_slice(&0u16.to_le_bytes());
+        oam[2..4].copy_from_slice(&0u16.to_le_bytes());
+        oam[4..6].copy_from_slice(&(512u16 | (1 << 10)).to_le_bytes());
+
+        vram[0x14000] = 0x02;
+        palette[0x204..0x206].copy_from_slice(&0x001Fu16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+    }
+
+    #[test]
+    fn mode4_rejects_obj_tiles_below_512() {
+        let mut video = Video::new();
+        video.write_display_control(4 | (1 << 4) | (1 << 10) | (1 << 12));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let mut oam = vec![0u8; 0x400];
+
+        vram[0] = 1;
+        palette[2..4].copy_from_slice(&0x03E0u16.to_le_bytes());
+
+        oam[0..2].copy_from_slice(&0u16.to_le_bytes());
+        oam[2..4].copy_from_slice(&0u16.to_le_bytes());
+        oam[4..6].copy_from_slice(&0u16.to_le_bytes());
+
+        vram[0x10000] = 0x02;
+        palette[0x204..0x206].copy_from_slice(&0x001Fu16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFF00_FF00);
+    }
+
+    #[test]
+    fn mode4_without_bg2_uses_backdrop_and_still_renders_obj() {
+        let mut video = Video::new();
+        video.write_display_control(4 | (1 << 4) | (1 << 12));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let mut oam = vec![0u8; 0x400];
+
+        palette[0..2].copy_from_slice(&0x7C00u16.to_le_bytes());
+
+        oam[0..2].copy_from_slice(&0u16.to_le_bytes());
+        oam[2..4].copy_from_slice(&0u16.to_le_bytes());
+        oam[4..6].copy_from_slice(&512u16.to_le_bytes());
+
+        vram[0x14000] = 0x01;
+        palette[0x202..0x204].copy_from_slice(&0x001Fu16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+        assert_eq!(video.framebuffer()[8], 0xFF00_00FF);
+    }
+
 }
