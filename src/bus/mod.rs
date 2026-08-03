@@ -1,13 +1,22 @@
 use std::error::Error;
 use std::fmt;
 
+mod dma;
 mod interrupt;
 mod io;
 mod memory;
+mod timer;
+
+pub use self::dma::{
+    DMA_CHANNEL_COUNT, DmaAddressControl, DmaChannel, DmaChannelIndex, DmaControl, DmaController,
+    DmaStartTiming, DmaTransferCompletion, DmaTransferRequest, DmaTransferWidth,
+};
 
 pub use self::interrupt::{InterruptController, InterruptSource};
 
 pub use self::io::IoRegisters;
+
+pub use self::timer::{TIMER_COUNT, Timer, TimerControl, TimerController, TimerIndex};
 
 pub(crate) const GAME_PAK_ROM_MAX_SIZE: usize = 32 * 1024 * 1024;
 
@@ -64,6 +73,13 @@ impl fmt::Display for BusLoadError {
 
 impl Error for BusLoadError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaRunResult {
+    pub channel: DmaChannelIndex,
+    pub transferred_units: u32,
+    pub cycles: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Bus {
     bios: Box<[u8; BIOS_SIZE]>,
@@ -81,6 +97,54 @@ pub struct Bus {
 }
 
 impl Bus {
+    pub const REG_TM0CNT_L: u32 = IoRegisters::BASE + IoRegisters::TM0CNT_L_OFFSET;
+
+    pub const REG_TM0CNT_H: u32 = IoRegisters::BASE + IoRegisters::TM0CNT_H_OFFSET;
+
+    pub const REG_TM1CNT_L: u32 = IoRegisters::BASE + IoRegisters::TM1CNT_L_OFFSET;
+
+    pub const REG_TM1CNT_H: u32 = IoRegisters::BASE + IoRegisters::TM1CNT_H_OFFSET;
+
+    pub const REG_TM2CNT_L: u32 = IoRegisters::BASE + IoRegisters::TM2CNT_L_OFFSET;
+
+    pub const REG_TM2CNT_H: u32 = IoRegisters::BASE + IoRegisters::TM2CNT_H_OFFSET;
+
+    pub const REG_TM3CNT_L: u32 = IoRegisters::BASE + IoRegisters::TM3CNT_L_OFFSET;
+
+    pub const REG_TM3CNT_H: u32 = IoRegisters::BASE + IoRegisters::TM3CNT_H_OFFSET;
+
+    pub const REG_DMA0SAD: u32 = IoRegisters::BASE + IoRegisters::DMA0SAD_OFFSET;
+
+    pub const REG_DMA0DAD: u32 = IoRegisters::BASE + IoRegisters::DMA0DAD_OFFSET;
+
+    pub const REG_DMA0CNT_L: u32 = IoRegisters::BASE + IoRegisters::DMA0CNT_L_OFFSET;
+
+    pub const REG_DMA0CNT_H: u32 = IoRegisters::BASE + IoRegisters::DMA0CNT_H_OFFSET;
+
+    pub const REG_DMA1SAD: u32 = IoRegisters::BASE + IoRegisters::DMA1SAD_OFFSET;
+
+    pub const REG_DMA1DAD: u32 = IoRegisters::BASE + IoRegisters::DMA1DAD_OFFSET;
+
+    pub const REG_DMA1CNT_L: u32 = IoRegisters::BASE + IoRegisters::DMA1CNT_L_OFFSET;
+
+    pub const REG_DMA1CNT_H: u32 = IoRegisters::BASE + IoRegisters::DMA1CNT_H_OFFSET;
+
+    pub const REG_DMA2SAD: u32 = IoRegisters::BASE + IoRegisters::DMA2SAD_OFFSET;
+
+    pub const REG_DMA2DAD: u32 = IoRegisters::BASE + IoRegisters::DMA2DAD_OFFSET;
+
+    pub const REG_DMA2CNT_L: u32 = IoRegisters::BASE + IoRegisters::DMA2CNT_L_OFFSET;
+
+    pub const REG_DMA2CNT_H: u32 = IoRegisters::BASE + IoRegisters::DMA2CNT_H_OFFSET;
+
+    pub const REG_DMA3SAD: u32 = IoRegisters::BASE + IoRegisters::DMA3SAD_OFFSET;
+
+    pub const REG_DMA3DAD: u32 = IoRegisters::BASE + IoRegisters::DMA3DAD_OFFSET;
+
+    pub const REG_DMA3CNT_L: u32 = IoRegisters::BASE + IoRegisters::DMA3CNT_L_OFFSET;
+
+    pub const REG_DMA3CNT_H: u32 = IoRegisters::BASE + IoRegisters::DMA3CNT_H_OFFSET;
+
     pub const REG_IE: u32 = IoRegisters::BASE + IoRegisters::IE_OFFSET;
 
     pub const REG_IF: u32 = IoRegisters::BASE + IoRegisters::IF_OFFSET;
@@ -384,6 +448,76 @@ impl Bus {
 
         self.rom.get(offset).copied().unwrap_or(0)
     }
+
+    pub fn tick(&mut self, cycles: u32) {
+        self.io.tick(cycles);
+    }
+
+    pub fn run_pending_dma(&mut self) -> Option<DmaRunResult> {
+        /*
+         * Extract the request first, releasing the mutable borrow of
+         * IoRegisters before accessing memory through Bus.
+         */
+        let request = self.io.dma_mut().next_pending_request()?;
+
+        let width_bytes = request.width.bytes();
+
+        let mut source = align_dma_address(request.source, request.width);
+
+        let mut destination = align_dma_address(request.destination, request.width);
+
+        for _ in 0..request.count {
+            match request.width {
+                DmaTransferWidth::Halfword => {
+                    let value = self.read16(source);
+
+                    self.write16(destination, value);
+                }
+
+                DmaTransferWidth::Word => {
+                    let value = self.read32(source);
+
+                    self.write32(destination, value);
+                }
+            }
+
+            source = advance_dma_address(source, width_bytes, request.source_control, true);
+
+            destination =
+                advance_dma_address(destination, width_bytes, request.destination_control, false);
+        }
+
+        let request_interrupt = request.irq_enabled;
+
+        self.io.dma_mut().complete_transfer(DmaTransferCompletion {
+            channel: request.channel,
+            final_source: source,
+            final_destination: destination,
+            transferred_units: request.count,
+            request_interrupt,
+        });
+
+        if request_interrupt {
+            self.io
+                .request_interrupt(request.channel.interrupt_source());
+        }
+
+        /*
+         * Placeholder timing:
+         *
+         * one read plus one write per transfer unit.
+         *
+         * Wait states and sequential/non-sequential accesses will
+         * replace this approximation later.
+         */
+        let cycles = request.count.saturating_mul(2).max(1);
+
+        Some(DmaRunResult {
+            channel: request.channel,
+            transferred_units: request.count,
+            cycles,
+        })
+    }
 }
 
 impl Default for Bus {
@@ -412,9 +546,29 @@ fn vram_offset(address: u32) -> usize {
     }
 }
 
+fn align_dma_address(address: u32, width: DmaTransferWidth) -> u32 {
+    match width {
+        DmaTransferWidth::Halfword => address & !1,
+
+        DmaTransferWidth::Word => address & !3,
+    }
+}
+
+fn advance_dma_address(address: u32, width: u32, control: DmaAddressControl, source: bool) -> u32 {
+    match control {
+        DmaAddressControl::Increment | DmaAddressControl::IncrementReload => {
+            address.wrapping_add(width)
+        }
+
+        DmaAddressControl::Decrement => address.wrapping_sub(width),
+
+        DmaAddressControl::Fixed => address,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Bus, BusLoadError, InterruptController, InterruptSource};
+    use super::{Bus, BusLoadError, DmaChannelIndex, InterruptController, InterruptSource};
 
     #[test]
     fn bios_is_loaded_and_read_only() {
@@ -543,5 +697,190 @@ mod tests {
         assert_eq!(bus.read16(Bus::REG_IE), InterruptSource::Timer0.mask());
 
         assert_eq!(bus.read16(Bus::REG_IF), 0);
+    }
+
+    #[test]
+    fn timer_zero_is_accessible_through_bus_mmio() {
+        let mut bus = Bus::new();
+
+        bus.write16(Bus::REG_TM0CNT_L, 0xFFF0);
+
+        bus.write16(Bus::REG_TM0CNT_H, 1 << 7);
+
+        bus.tick(5);
+
+        assert_eq!(bus.read16(Bus::REG_TM0CNT_L), 0xFFF5);
+    }
+
+    #[test]
+    fn timer_overflow_requests_interrupt_through_bus() {
+        let mut bus = Bus::new();
+
+        bus.write16(Bus::REG_IE, InterruptSource::Timer0.mask());
+
+        bus.write16(Bus::REG_IME, 1);
+
+        bus.write16(Bus::REG_TM0CNT_L, 0xFFFF);
+
+        bus.write16(Bus::REG_TM0CNT_H, (1 << 7) | (1 << 6));
+
+        assert!(!bus.irq_line());
+
+        bus.tick(1);
+
+        assert!(bus.irq_line());
+
+        assert_eq!(
+            bus.read16(Bus::REG_IF) & InterruptSource::Timer0.mask(),
+            InterruptSource::Timer0.mask()
+        );
+    }
+
+    #[test]
+    fn immediate_dma_copies_halfwords() {
+        let mut bus = Bus::new();
+
+        bus.write16(0x0200_0100, 0x1111);
+
+        bus.write16(0x0200_0102, 0x2222);
+
+        bus.write16(0x0200_0104, 0x3333);
+
+        bus.write32(Bus::REG_DMA0SAD, 0x0200_0100);
+
+        bus.write32(Bus::REG_DMA0DAD, 0x0300_0100);
+
+        bus.write16(Bus::REG_DMA0CNT_L, 3);
+
+        /*
+         * Immediate, halfword, enable.
+         */
+        bus.write16(Bus::REG_DMA0CNT_H, 1 << 15);
+
+        let result = bus.run_pending_dma().unwrap();
+
+        assert_eq!(result.channel, DmaChannelIndex::Dma0);
+
+        assert_eq!(result.transferred_units, 3);
+
+        assert_eq!(bus.read16(0x0300_0100), 0x1111);
+
+        assert_eq!(bus.read16(0x0300_0102), 0x2222);
+
+        assert_eq!(bus.read16(0x0300_0104), 0x3333);
+
+        /*
+         * Enable clears after immediate transfer.
+         */
+        assert_eq!(bus.read16(Bus::REG_DMA0CNT_H) & (1 << 15), 0);
+    }
+
+    #[test]
+    fn immediate_dma_copies_words() {
+        let mut bus = Bus::new();
+
+        bus.write32(0x0200_0100, 0x1111_1111);
+
+        bus.write32(0x0200_0104, 0x2222_2222);
+
+        bus.write32(Bus::REG_DMA0SAD, 0x0200_0100);
+
+        bus.write32(Bus::REG_DMA0DAD, 0x0300_0100);
+
+        bus.write16(Bus::REG_DMA0CNT_L, 2);
+
+        /*
+         * 32-bit transfer + enable.
+         */
+        bus.write16(Bus::REG_DMA0CNT_H, (1 << 10) | (1 << 15));
+
+        bus.run_pending_dma().unwrap();
+
+        assert_eq!(bus.read32(0x0300_0100), 0x1111_1111);
+
+        assert_eq!(bus.read32(0x0300_0104), 0x2222_2222);
+    }
+
+    #[test]
+    fn dma_fixed_destination_repeatedly_writes_same_address() {
+        let mut bus = Bus::new();
+
+        bus.write16(0x0200_0100, 1);
+        bus.write16(0x0200_0102, 2);
+        bus.write16(0x0200_0104, 3);
+
+        bus.write32(Bus::REG_DMA0SAD, 0x0200_0100);
+
+        bus.write32(Bus::REG_DMA0DAD, 0x0300_0100);
+
+        bus.write16(Bus::REG_DMA0CNT_L, 3);
+
+        /*
+         * Destination fixed:
+         *
+         * destination control = 0b10.
+         */
+        bus.write16(Bus::REG_DMA0CNT_H, (0b10 << 5) | (1 << 15));
+
+        bus.run_pending_dma().unwrap();
+
+        /*
+         * Last source value wins.
+         */
+        assert_eq!(bus.read16(0x0300_0100), 3);
+    }
+
+    #[test]
+    fn dma_can_decrement_source_and_destination() {
+        let mut bus = Bus::new();
+
+        bus.write16(0x0200_0100, 0x1111);
+        bus.write16(0x0200_0102, 0x2222);
+        bus.write16(0x0200_0104, 0x3333);
+
+        bus.write32(Bus::REG_DMA0SAD, 0x0200_0104);
+
+        bus.write32(Bus::REG_DMA0DAD, 0x0300_0104);
+
+        bus.write16(Bus::REG_DMA0CNT_L, 3);
+
+        /*
+         * Destination decrement = 01
+         * Source decrement      = 01
+         */
+        bus.write16(Bus::REG_DMA0CNT_H, (0b01 << 5) | (0b01 << 7) | (1 << 15));
+
+        bus.run_pending_dma().unwrap();
+
+        assert_eq!(bus.read16(0x0300_0104), 0x3333);
+
+        assert_eq!(bus.read16(0x0300_0102), 0x2222);
+
+        assert_eq!(bus.read16(0x0300_0100), 0x1111);
+    }
+
+    #[test]
+    fn dma_completion_sets_interrupt_flag() {
+        let mut bus = Bus::new();
+
+        bus.write16(0x0200_0100, 0xCAFE);
+
+        bus.write32(Bus::REG_DMA0SAD, 0x0200_0100);
+
+        bus.write32(Bus::REG_DMA0DAD, 0x0300_0100);
+
+        bus.write16(Bus::REG_DMA0CNT_L, 1);
+
+        /*
+         * IRQ on completion + enable.
+         */
+        bus.write16(Bus::REG_DMA0CNT_H, (1 << 14) | (1 << 15));
+
+        bus.run_pending_dma().unwrap();
+
+        assert_eq!(
+            bus.read16(Bus::REG_IF) & InterruptSource::Dma0.mask(),
+            InterruptSource::Dma0.mask()
+        );
     }
 }

@@ -92,7 +92,7 @@ impl Cpu {
         }
     }
 
-    pub fn registers(&self) -> &Registers {
+    pub const fn registers(&self) -> &Registers {
         &self.registers
     }
 
@@ -950,5 +950,88 @@ mod tests {
         cpu.step(&mut bus);
 
         assert_eq!(cpu.registers().read(0), 42);
+    }
+
+    #[test]
+    fn timer_overflow_enters_irq_on_next_cpu_step() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * NOP at application address.
+         */
+        bus.write32(0x0200_0000, 0xE1A0_0000);
+
+        cpu.registers_mut().cpsr_mut().set_mode(CpuMode::System);
+
+        cpu.registers_mut().cpsr_mut().set_irq_disabled(false);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        /*
+         * Enable Timer0 interrupt in the GBA interrupt controller.
+         */
+        bus.write16(Bus::REG_IE, InterruptSource::Timer0.mask());
+
+        bus.write16(Bus::REG_IME, 1);
+
+        /*
+         * Overflow after one CPU cycle.
+         */
+        bus.write16(Bus::REG_TM0CNT_L, 0xFFFF);
+
+        bus.write16(Bus::REG_TM0CNT_H, (1 << 7) | (1 << 6));
+
+        /*
+         * Execute one CPU instruction.
+         */
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().mode(), CpuMode::System);
+
+        /*
+         * Advance peripherals by elapsed CPU time.
+         */
+        bus.tick(cycles);
+
+        assert!(bus.irq_line());
+
+        /*
+         * The following CPU step samples IRQ before fetching another
+         * application instruction.
+         */
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().mode(), CpuMode::Irq);
+
+        assert_eq!(cpu.registers().pc(), 0x0000_0018);
+
+        assert_eq!(
+            bus.read16(Bus::REG_IF) & InterruptSource::Timer0.mask(),
+            InterruptSource::Timer0.mask()
+        );
+    }
+
+    #[test]
+    fn timer_one_can_count_timer_zero_overflows() {
+        let mut bus = Bus::new();
+
+        /*
+         * Timer0 overflows every CPU cycle.
+         */
+        bus.write16(Bus::REG_TM0CNT_L, 0xFFFF);
+
+        bus.write16(Bus::REG_TM0CNT_H, 1 << 7);
+
+        /*
+         * Timer1 cascade mode.
+         */
+        bus.write16(Bus::REG_TM1CNT_L, 0);
+
+        bus.write16(Bus::REG_TM1CNT_H, (1 << 7) | (1 << 2));
+
+        bus.tick(100);
+
+        assert_eq!(bus.read16(Bus::REG_TM1CNT_L), 100);
     }
 }

@@ -1,11 +1,11 @@
 mod bus;
 mod cpu;
+mod gba;
 mod loader;
 
 use std::{env, error::Error, ffi::OsString, fmt, path::PathBuf, process::ExitCode};
 
-use bus::Bus;
-use cpu::Cpu;
+use gba::Gba;
 use loader::{load_bios_file, load_rom_file};
 
 fn main() -> ExitCode {
@@ -43,21 +43,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("Version:    {}", rom.header().software_version());
     println!("ROM size:   {} bytes", rom.bytes().len());
 
-    let mut bus = Bus::new();
+    let mut gba = Gba::with_images(bios.bytes(), rom.bytes())?;
 
-    bus.load_bios(bios.bytes())?;
-    bus.load_rom(rom.bytes())?;
+    gba.registers_mut().set_pc(0);
 
-    let mut cpu = Cpu::new();
+    let consumed_cycles = gba.run_steps(1_000);
 
-    cpu.reset();
-    cpu.registers_mut().set_pc(0x0000_0000);
+    println!("Stopped after {consumed_cycles} cycles");
 
-    loop {
-        cpu.step(&mut bus);
-    }
+    println!("PC = 0x{:08X}", gba.registers().pc(),);
 
-    #[allow(unreachable_code)]
     Ok(())
 }
 
