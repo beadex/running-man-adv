@@ -16,6 +16,8 @@ mod instruction;
 mod instruction_decoder;
 mod multiply;
 mod multiply_executor;
+mod multiply_long;
+mod multiply_long_executor;
 mod single_data_transfer;
 mod single_data_transfer_executor;
 
@@ -76,6 +78,12 @@ pub use self::multiply::{MultiplyDecodeError, MultiplyInstruction, decode_multip
 pub use self::multiply_executor::{
     MultiplyExecutionResult, execute_multiply, multiply_iteration_count,
 };
+
+pub use self::multiply_long::{
+    MultiplyLongDecodeError, MultiplyLongInstruction, decode_multiply_long,
+};
+
+pub use self::multiply_long_executor::{MultiplyLongExecutionResult, execute_multiply_long};
 
 pub use self::single_data_transfer::{
     SingleDataTransferDecodeError, SingleDataTransferInstruction, TransferOffset,

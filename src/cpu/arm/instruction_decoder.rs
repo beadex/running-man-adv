@@ -1,9 +1,10 @@
 use super::{
     ArmInstruction, ArmInstructionKind, BlockDataTransferDecodeError, BranchDecodeError,
     BranchExchangeDecodeError, DataProcessingDecodeError, HalfwordDataTransferDecodeError,
-    MultiplyDecodeError, SingleDataTransferDecodeError, classify, condition,
-    decode_block_data_transfer, decode_branch, decode_branch_exchange, decode_data_processing,
-    decode_halfword_data_transfer, decode_multiply, decode_single_data_transfer,
+    MultiplyDecodeError, MultiplyLongDecodeError, SingleDataTransferDecodeError, classify,
+    condition, decode_block_data_transfer, decode_branch, decode_branch_exchange,
+    decode_data_processing, decode_halfword_data_transfer, decode_multiply, decode_multiply_long,
+    decode_single_data_transfer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +15,7 @@ pub enum ArmDecodeError {
     DataProcessing(DataProcessingDecodeError),
     HalfwordDataTransfer(HalfwordDataTransferDecodeError),
     Multiply(MultiplyDecodeError),
+    MultiplyLong(MultiplyLongDecodeError),
     SingleDataTransfer(SingleDataTransferDecodeError),
 }
 
@@ -62,17 +64,19 @@ pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
             Ok(ArmInstruction::Multiply(decoded))
         }
 
+        ArmInstructionKind::MultiplyLong => {
+            let decoded =
+                decode_multiply_long(instruction).map_err(ArmDecodeError::MultiplyLong)?;
+
+            Ok(ArmInstruction::MultiplyLong(decoded))
+        }
+
         ArmInstructionKind::SingleDataTransfer => {
             let decoded = decode_single_data_transfer(instruction)
                 .map_err(ArmDecodeError::SingleDataTransfer)?;
 
             Ok(ArmInstruction::SingleDataTransfer(decoded))
         }
-
-        ArmInstructionKind::MultiplyLong => Ok(ArmInstruction::MultiplyLong {
-            condition,
-            raw: instruction,
-        }),
 
         ArmInstructionKind::SingleDataSwap => Ok(ArmInstruction::SingleDataSwap {
             condition,
@@ -254,6 +258,29 @@ mod tests {
 
             other => {
                 panic!("expected block data transfer, got {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn decodes_typed_signed_multiply_accumulate_long() {
+        /*
+         * SMLAL R0, R1, R2, R3
+         */
+        let instruction = decode_arm(0xE0E1_0392).unwrap();
+
+        match instruction {
+            ArmInstruction::MultiplyLong(decoded) => {
+                assert!(decoded.signed);
+                assert!(decoded.accumulate);
+                assert_eq!(decoded.rd_lo, 0);
+                assert_eq!(decoded.rd_hi, 1);
+                assert_eq!(decoded.rm, 2);
+                assert_eq!(decoded.rs, 3);
+            }
+
+            other => {
+                panic!("expected multiply-long instruction, got {other:?}");
             }
         }
     }

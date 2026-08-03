@@ -5,13 +5,15 @@ use super::{
     DataProcessingExecutionError, HalfwordDataTransferExecutionError,
     SingleDataTransferExecutionError, execute_block_data_transfer, execute_branch,
     execute_branch_exchange, execute_data_processing, execute_halfword_data_transfer,
-    execute_multiply, execute_single_data_transfer,
+    execute_multiply, execute_multiply_long, execute_single_data_transfer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmExecutionError {
     BlockDataTransfer(BlockDataTransferExecutionError),
+
     BranchExchange(BranchExchangeExecutionError),
+
     DataProcessing(DataProcessingExecutionError),
 
     HalfwordDataTransfer(HalfwordDataTransferExecutionError),
@@ -45,6 +47,7 @@ pub fn execute_arm(
                 .map(|_| ())
                 .map_err(ArmExecutionError::BranchExchange)
         }
+
         ArmInstruction::DataProcessing(instruction) => {
             execute_data_processing(registers, *instruction)
                 .map_err(ArmExecutionError::DataProcessing)
@@ -58,6 +61,12 @@ pub fn execute_arm(
 
         ArmInstruction::Multiply(instruction) => {
             execute_multiply(registers, *instruction);
+
+            Ok(())
+        }
+
+        ArmInstruction::MultiplyLong(instruction) => {
+            execute_multiply_long(registers, *instruction);
 
             Ok(())
         }

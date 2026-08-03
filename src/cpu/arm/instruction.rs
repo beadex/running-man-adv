@@ -1,27 +1,22 @@
 use super::{
     ArmCondition, BlockDataTransferInstruction, BranchExchangeInstruction, BranchInstruction,
     DataProcessingInstruction, HalfwordDataTransferInstruction, MultiplyInstruction,
-    SingleDataTransferInstruction,
+    MultiplyLongInstruction, SingleDataTransferInstruction,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmInstruction {
+    BlockDataTransfer(BlockDataTransferInstruction),
+    BranchExchange(BranchExchangeInstruction),
     DataProcessing(DataProcessingInstruction),
 
-    BranchExchange(BranchExchangeInstruction),
-
     Multiply(MultiplyInstruction),
+
+    MultiplyLong(MultiplyLongInstruction),
 
     SingleDataTransfer(SingleDataTransferInstruction),
 
     HalfwordDataTransfer(HalfwordDataTransferInstruction),
-
-    BlockDataTransfer(BlockDataTransferInstruction),
-
-    MultiplyLong {
-        condition: ArmCondition,
-        raw: u32,
-    },
 
     SingleDataSwap {
         condition: ArmCondition,
@@ -69,12 +64,13 @@ impl ArmInstruction {
 
             Self::Multiply(instruction) => instruction.condition,
 
+            Self::MultiplyLong(instruction) => instruction.condition,
+
             Self::SingleDataTransfer(instruction) => instruction.condition,
 
             Self::HalfwordDataTransfer(instruction) => instruction.condition,
 
-            Self::MultiplyLong { condition, .. }
-            | Self::SingleDataSwap { condition, .. }
+            Self::SingleDataSwap { condition, .. }
             | Self::CoprocessorDataTransfer { condition, .. }
             | Self::CoprocessorDataOperation { condition, .. }
             | Self::CoprocessorRegisterTransfer { condition, .. }
