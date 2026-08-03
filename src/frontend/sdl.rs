@@ -44,7 +44,7 @@ const WINDOW_WIDTH: u32 = SCREEN_WIDTH as u32 * DEFAULT_SCALE;
 
 const WINDOW_HEIGHT: u32 = SCREEN_HEIGHT as u32 * DEFAULT_SCALE;
 
-const DEBUG_INTERVAL_CYCLES: u64 = 100_000;
+const DEBUG_INTERVAL_CYCLES: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrontendAction {

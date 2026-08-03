@@ -37,16 +37,6 @@ pub fn execute_arm(
     instruction: &ArmInstruction,
     instruction_address: u32,
 ) -> Result<ArmExecutionResult, ArmExecutionError> {
-    /*
-     * Cpu::step_arm() advances PC to instruction_address + 4 before
-     * calling this dispatcher.
-     *
-     * For executors that do not explicitly return a branch flag, we
-     * can detect control-flow changes by comparing PC with this value
-     * after execution.
-     */
-    let expected_sequential_pc = instruction_address.wrapping_add(4);
-
     match instruction {
         ArmInstruction::BlockDataTransfer(instruction) => {
             let result =
@@ -85,23 +75,13 @@ pub fn execute_arm(
         }
 
         ArmInstruction::DataProcessing(instruction) => {
-            execute_data_processing(registers, *instruction)
+            let result = execute_data_processing(registers, *instruction, instruction_address)
                 .map_err(ArmExecutionError::DataProcessing)?;
 
-            /*
-             * Most data-processing instructions are sequential.
-             *
-             * Some forms can write PC:
-             *
-             * MOV PC, Rm
-             * ADD PC, ...
-             * SUBS PC, LR, #4
-             *
-             * The latter can also perform exception return.
-             */
-            let branch = registers.pc() != expected_sequential_pc;
-
-            Ok(ArmExecutionResult { cycles: 1, branch })
+            Ok(ArmExecutionResult {
+                cycles: result.cycles,
+                branch: result.branch,
+            })
         }
 
         ArmInstruction::HalfwordDataTransfer(instruction) => {

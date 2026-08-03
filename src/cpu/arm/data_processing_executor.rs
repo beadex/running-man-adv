@@ -7,26 +7,48 @@ use super::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataProcessingExecutionError {
-    /*
-     * Reading R15 as Operand2 or shift register requires
-     * pipeline-visible PC semantics.
-     */
-    OperandUsesProgramCounter,
-
     ExceptionReturn(ExceptionError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataProcessingExecutionResult {
+    pub cycles: u32,
+    pub branch: bool,
+}
+
+impl DataProcessingExecutionResult {
+    pub const fn sequential(cycles: u32) -> Self {
+        Self {
+            cycles,
+            branch: false,
+        }
+    }
+
+    pub const fn branched(cycles: u32) -> Self {
+        Self {
+            cycles,
+            branch: true,
+        }
+    }
 }
 
 pub fn execute_data_processing(
     registers: &mut Registers,
     instruction: DataProcessingInstruction,
-) -> Result<(), DataProcessingExecutionError> {
+    instruction_address: u32,
+) -> Result<DataProcessingExecutionResult, DataProcessingExecutionError> {
     let old_cpsr = registers.cpsr();
     let old_carry = old_cpsr.carry();
 
-    let operand2 = evaluate_operand2(registers, instruction.operand2, old_carry)?;
+    let operand2 = evaluate_operand2(
+        registers,
+        instruction.operand2,
+        old_carry,
+        instruction_address,
+    );
 
     let rn_value = if instruction.opcode.uses_rn() {
-        read_operand_register(registers, instruction.rn)?
+        read_arm_operand_register(registers, instruction.rn, instruction_address)
     } else {
         0
     };
@@ -51,7 +73,7 @@ pub fn execute_data_processing(
                 return_from_exception(registers, outcome.value)
                     .map_err(DataProcessingExecutionError::ExceptionReturn)?;
 
-                return Ok(());
+                return Ok(DataProcessingExecutionResult::branched(1));
             }
 
             /*
@@ -67,7 +89,7 @@ pub fn execute_data_processing(
 
             registers.set_pc(target);
 
-            return Ok(());
+            return Ok(DataProcessingExecutionResult::branched(1));
         }
 
         registers.write(instruction.rd as usize, outcome.value);
@@ -86,7 +108,7 @@ pub fn execute_data_processing(
             .set_nzcv(flags.negative, flags.zero, flags.carry, flags.overflow);
     }
 
-    Ok(())
+    Ok(DataProcessingExecutionResult::sequential(1))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -173,39 +195,60 @@ fn evaluate_operand2(
     registers: &Registers,
     operand2: Operand2,
     old_carry: bool,
-) -> Result<ShiftResult, DataProcessingExecutionError> {
+    instruction_address: u32,
+) -> ShiftResult {
     match operand2 {
-        Operand2::Immediate { value, rotate } => {
-            Ok(expand_rotated_immediate(value, rotate, old_carry))
-        }
+        Operand2::Immediate { value, rotate } => expand_rotated_immediate(value, rotate, old_carry),
 
-        Operand2::Register(shift) => {
-            let value = read_operand_register(registers, shift.rm)?;
+        Operand2::Register(shift) => match shift.amount {
+            ShiftAmount::Immediate(amount) => {
+                /*
+                 * For an immediate shift, R15 as Rm reads the normal
+                 * ARM architectural PC: instruction address + 8.
+                 */
+                let value = read_arm_operand_register(registers, shift.rm, instruction_address);
 
-            match shift.amount {
-                ShiftAmount::Immediate(amount) => {
-                    Ok(shift_immediate(value, shift.shift_type, amount, old_carry))
-                }
-
-                ShiftAmount::Register(rs) => {
-                    let rs_value = read_operand_register(registers, rs)?;
-
-                    Ok(shift_register(value, shift.shift_type, rs_value, old_carry))
-                }
+                shift_immediate(value, shift.shift_type, amount, old_carry)
             }
-        }
+
+            ShiftAmount::Register(rs) => {
+                /*
+                 * A register-controlled shift takes an extra internal
+                 * cycle. When R15 is Rm, the value observed is PC + 12.
+                 *
+                 * R15 as Rs is architecturally unusual/unpredictable on
+                 * ARM7TDMI, but using the normal PC + 8 operand value is
+                 * deterministic and matches the visible register model.
+                 */
+                let value = read_arm_shifted_rm(registers, shift.rm, instruction_address, true);
+
+                let rs_value = read_arm_operand_register(registers, rs, instruction_address);
+
+                shift_register(value, shift.shift_type, rs_value, old_carry)
+            }
+        },
     }
 }
 
-fn read_operand_register(
+fn read_arm_operand_register(registers: &Registers, index: u8, instruction_address: u32) -> u32 {
+    if index as usize == Registers::PC {
+        instruction_address.wrapping_add(8)
+    } else {
+        registers.read(index as usize)
+    }
+}
+
+fn read_arm_shifted_rm(
     registers: &Registers,
     index: u8,
-) -> Result<u32, DataProcessingExecutionError> {
+    instruction_address: u32,
+    shift_by_register: bool,
+) -> u32 {
     if index as usize == Registers::PC {
-        return Err(DataProcessingExecutionError::OperandUsesProgramCounter);
+        instruction_address.wrapping_add(if shift_by_register { 12 } else { 8 })
+    } else {
+        registers.read(index as usize)
     }
-
-    Ok(registers.read(index as usize))
 }
 
 #[cfg(test)]
@@ -217,10 +260,12 @@ mod tests {
         arm::{DataProcessingOpcode, decode_data_processing},
     };
 
+    const TEST_INSTRUCTION_ADDRESS: u32 = 0x0200_0000;
+
     fn execute(registers: &mut Registers, raw_instruction: u32) {
         let instruction = decode_data_processing(raw_instruction).unwrap();
 
-        execute_data_processing(registers, instruction).unwrap();
+        execute_data_processing(registers, instruction, TEST_INSTRUCTION_ADDRESS).unwrap();
     }
 
     #[test]
@@ -412,7 +457,7 @@ mod tests {
          */
         let instruction = decode_data_processing(0xE1B0_F00E).unwrap();
 
-        execute_data_processing(&mut registers, instruction).unwrap();
+        execute_data_processing(&mut registers, instruction, 0x0000_0008).unwrap();
 
         assert_eq!(registers.cpsr(), original_cpsr);
 
@@ -421,5 +466,68 @@ mod tests {
         assert_eq!(registers.mode(), CpuMode::System);
 
         assert!(registers.cpsr().thumb_state());
+    }
+    #[test]
+    fn add_can_read_pc_as_rn() {
+        let mut registers = Registers::new();
+
+        /*
+         * ADD R0, PC, #1
+         *
+         * At 0x00000114, ARM architectural PC is 0x0000011C.
+         */
+        let instruction = decode_data_processing(0xE28F_0001).unwrap();
+
+        let result = execute_data_processing(&mut registers, instruction, 0x0000_0114).unwrap();
+
+        assert_eq!(registers.read(0), 0x0000_011D);
+        assert!(!result.branch);
+    }
+
+    #[test]
+    fn immediate_shift_can_read_pc_as_rm() {
+        let mut registers = Registers::new();
+
+        /*
+         * MOV R0, PC
+         */
+        let instruction = decode_data_processing(0xE1A0_000F).unwrap();
+
+        execute_data_processing(&mut registers, instruction, 0x0200_0000).unwrap();
+
+        assert_eq!(registers.read(0), 0x0200_0008);
+    }
+
+    #[test]
+    fn register_shift_reads_pc_as_rm_plus_twelve() {
+        let mut registers = Registers::new();
+        registers.write(1, 0);
+
+        /*
+         * MOV R0, PC, LSL R1
+         *
+         * With a register-controlled shift, Rm=PC observes PC+12.
+         */
+        let instruction = decode_data_processing(0xE1A0_011F).unwrap();
+
+        execute_data_processing(&mut registers, instruction, 0x0200_0000).unwrap();
+
+        assert_eq!(registers.read(0), 0x0200_000C);
+    }
+
+    #[test]
+    fn ordinary_write_to_pc_reports_branch() {
+        let mut registers = Registers::new();
+        registers.write(0, 0x0800_0123);
+
+        /*
+         * MOV PC, R0
+         */
+        let instruction = decode_data_processing(0xE1A0_F000).unwrap();
+
+        let result = execute_data_processing(&mut registers, instruction, 0x0200_0000).unwrap();
+
+        assert!(result.branch);
+        assert_eq!(registers.pc(), 0x0800_0120);
     }
 }
