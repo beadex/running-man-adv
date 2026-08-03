@@ -1,7 +1,7 @@
 use crate::{
     bus::{
         Bus, BusLoadError, InterruptController, InterruptSource, IoRegisters, Key,
-        PowerStateRequest, SCREEN_HEIGHT, SCREEN_WIDTH,
+        PowerStateRequest,
     },
     cpu::{Cpu, CpuState, Registers},
 };
@@ -166,6 +166,13 @@ impl Gba {
     }
 
     pub fn run_until_frame(&mut self) -> u64 {
+        /*
+         * A complete GBA frame is 228 scanlines × 1232 cycles = 280,896
+         * cycles. Allow two frame periods before giving up so a PPU bug
+         * cannot freeze the SDL event loop forever.
+         */
+        const MAX_CYCLES_WITHOUT_FRAME: u64 = 280_896 * 2;
+
         let starting_cycles = self.elapsed_cycles;
 
         /*
@@ -175,9 +182,21 @@ impl Gba {
         self.take_frame_ready();
 
         while !self.stopped {
-            self.step();
+            let cycles = self.step();
 
             if self.take_frame_ready() {
+                break;
+            }
+
+            if cycles == 0 {
+                break;
+            }
+
+            let consumed_cycles = self.elapsed_cycles.wrapping_sub(starting_cycles);
+
+            if consumed_cycles >= MAX_CYCLES_WITHOUT_FRAME {
+                eprintln!("warning: PPU did not produce a frame after {consumed_cycles} cycles");
+
                 break;
             }
         }

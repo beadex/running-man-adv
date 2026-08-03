@@ -1,12 +1,18 @@
 mod bus;
 mod cpu;
+mod frontend;
 mod gba;
 mod loader;
 
 use std::{env, error::Error, ffi::OsString, fmt, path::PathBuf, process::ExitCode};
 
-use gba::Gba;
-use loader::{load_bios_file, load_rom_file};
+use anyhow::{Context, Result};
+
+use crate::{
+    frontend::sdl,
+    gba::Gba,
+    loader::{load_bios_file, load_rom_file},
+};
 
 fn main() -> ExitCode {
     match run() {
@@ -27,37 +33,28 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<()> {
     let config = Config::from_args(env::args_os())?;
 
-    let bios = load_bios_file(&config.bios_path)?;
-    let rom = load_rom_file(&config.rom_path)?;
+    let bios = load_bios_file(&config.bios_path)
+        .with_context(|| format!("failed to load BIOS from {}", config.bios_path.display()))?;
+
+    let rom = load_rom_file(&config.rom_path)
+        .with_context(|| format!("failed to load ROM from {}", config.rom_path.display()))?;
 
     println!("GBA emulator starting...");
     println!("BIOS: {}", config.bios_path.display());
     println!("ROM:  {}", config.rom_path.display());
-
     println!("Title:      {}", rom.header().title());
     println!("Game code:  {}", rom.header().game_code());
     println!("Maker code: {}", rom.header().maker_code());
     println!("Version:    {}", rom.header().software_version());
     println!("ROM size:   {} bytes", rom.bytes().len());
 
-    let mut gba = Gba::with_images(bios.bytes(), rom.bytes())?;
+    let gba = Gba::with_images(bios.bytes(), rom.bytes())
+        .context("failed to initialize the GBA machine")?;
 
-    loop {
-        gba.step();
-
-        if gba.take_frame_ready() {
-            let framebuffer = gba.framebuffer();
-
-            println!(
-                "frame={} pixel(0,0)=0x{:08X}",
-                gba.frame_number(),
-                framebuffer[0],
-            );
-        }
-    }
+    sdl::run(gba).context("SDL frontend failed")
 }
 
 #[derive(Debug)]
@@ -121,11 +118,8 @@ impl Config {
 #[derive(Debug)]
 enum CliError {
     MissingRequiredOption { option: &'static str },
-
     MissingOptionValue { option: &'static str },
-
     UnknownArgument(OsString),
-
     HelpRequested { executable: PathBuf },
 }
 
@@ -136,7 +130,7 @@ impl fmt::Display for CliError {
                 write!(
                     formatter,
                     "missing required option {option}\n\n{}",
-                    usage("gba-emulator")
+                    usage("gba-emulator"),
                 )
             }
 
@@ -144,7 +138,7 @@ impl fmt::Display for CliError {
                 write!(
                     formatter,
                     "missing value for option {option}\n\n{}",
-                    usage("gba-emulator")
+                    usage("gba-emulator"),
                 )
             }
 
@@ -153,7 +147,7 @@ impl fmt::Display for CliError {
                     formatter,
                     "unknown argument '{}'\n\n{}",
                     argument.to_string_lossy(),
-                    usage("gba-emulator")
+                    usage("gba-emulator"),
                 )
             }
 

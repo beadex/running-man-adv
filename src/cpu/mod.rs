@@ -259,6 +259,7 @@ impl Cpu {
 
         let fetch = bus.read16_timed(instruction_address, fetch_kind);
 
+        #[cfg(feature = "cpu-trace")]
         println!(
             "THUMB PC=0x{instruction_address:08X} \
          instruction=0x{:04X}",
