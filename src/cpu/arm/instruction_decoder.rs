@@ -1,12 +1,14 @@
 use super::{
-    ArmInstruction, ArmInstructionKind, BranchDecodeError, DataProcessingDecodeError, classify,
-    condition, decode_branch, decode_data_processing,
+    ArmInstruction, ArmInstructionKind, BranchDecodeError, BranchExchangeDecodeError,
+    DataProcessingDecodeError, classify, condition, decode_branch, decode_branch_exchange,
+    decode_data_processing,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmDecodeError {
     DataProcessing(DataProcessingDecodeError),
     Branch(BranchDecodeError),
+    BranchExchange(BranchExchangeDecodeError),
 }
 
 pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
@@ -27,10 +29,12 @@ pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
             Ok(ArmInstruction::Branch(decoded))
         }
 
-        ArmInstructionKind::BranchExchange => Ok(ArmInstruction::BranchExchange {
-            condition,
-            register: (instruction & 0x0F) as u8,
-        }),
+        ArmInstructionKind::BranchExchange => {
+            let decoded =
+                decode_branch_exchange(instruction).map_err(ArmDecodeError::BranchExchange)?;
+
+            Ok(ArmInstruction::BranchExchange(decoded))
+        }
 
         ArmInstructionKind::Multiply => Ok(ArmInstruction::Multiply {
             condition,
@@ -130,16 +134,15 @@ mod tests {
     }
 
     #[test]
-    fn decodes_branch_exchange() {
-        // BX LR
+    fn decodes_typed_branch_exchange() {
         let instruction = decode_arm(0xE12F_FF1E).unwrap();
 
         assert_eq!(
             instruction,
-            ArmInstruction::BranchExchange {
+            ArmInstruction::BranchExchange(crate::cpu::arm::BranchExchangeInstruction {
                 condition: ArmCondition::Always,
                 register: 14,
-            }
+            })
         );
     }
 

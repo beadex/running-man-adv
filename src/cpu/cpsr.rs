@@ -8,11 +8,13 @@ impl Cpsr {
     pub const ZERO_BIT: u32 = 30;
     pub const CARRY_BIT: u32 = 29;
     pub const OVERFLOW_BIT: u32 = 28;
+    pub const THUMB_STATE_BIT: u32 = 5;
 
     pub const NEGATIVE_MASK: u32 = 1 << Self::NEGATIVE_BIT;
     pub const ZERO_MASK: u32 = 1 << Self::ZERO_BIT;
     pub const CARRY_MASK: u32 = 1 << Self::CARRY_BIT;
     pub const OVERFLOW_MASK: u32 = 1 << Self::OVERFLOW_BIT;
+    pub const THUMB_STATE_MASK: u32 = 1 << Self::THUMB_STATE_BIT;
 
     pub const fn new() -> Self {
         Self { value: 0 }
@@ -46,6 +48,10 @@ impl Cpsr {
         self.value & Self::OVERFLOW_MASK != 0
     }
 
+    pub const fn thumb_state(self) -> bool {
+        self.value & Self::THUMB_STATE_MASK != 0
+    }
+
     pub fn set_negative(&mut self, value: bool) {
         self.set_flag(Self::NEGATIVE_MASK, value);
     }
@@ -60,6 +66,10 @@ impl Cpsr {
 
     pub fn set_overflow(&mut self, value: bool) {
         self.set_flag(Self::OVERFLOW_MASK, value);
+    }
+
+    pub fn set_thumb_state(&mut self, enabled: bool) {
+        self.set_flag(Self::THUMB_STATE_MASK, enabled);
     }
 
     pub fn set_nzcv(&mut self, negative: bool, zero: bool, carry: bool, overflow: bool) {
@@ -152,5 +162,21 @@ mod tests {
         assert!(!cpsr.zero());
         assert!(!cpsr.carry());
         assert!(cpsr.overflow());
+    }
+
+    #[test]
+    fn can_set_thumb_state_bit() {
+        let mut cpsr = Cpsr::new();
+
+        assert!(!cpsr.thumb_state());
+
+        cpsr.set_thumb_state(true);
+
+        assert!(cpsr.thumb_state());
+        assert_eq!(cpsr.raw() & Cpsr::THUMB_STATE_MASK, Cpsr::THUMB_STATE_MASK);
+
+        cpsr.set_thumb_state(false);
+
+        assert!(!cpsr.thumb_state());
     }
 }

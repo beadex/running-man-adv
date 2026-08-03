@@ -16,7 +16,6 @@ pub enum CpuState {
 #[derive(Debug)]
 pub struct Cpu {
     registers: Registers,
-    state: CpuState,
     halted: bool,
 }
 
@@ -24,7 +23,6 @@ impl Cpu {
     pub fn new() -> Self {
         Self {
             registers: Registers::new(),
-            state: CpuState::Arm,
             halted: false,
         }
     }
@@ -32,7 +30,7 @@ impl Cpu {
     pub fn reset(&mut self) {
         self.registers = Registers::new();
         self.registers.set_pc(0);
-        self.state = CpuState::Arm;
+        self.registers.cpsr_mut().set_thumb_state(false);
         self.halted = false;
     }
 
@@ -41,7 +39,7 @@ impl Cpu {
             return 1;
         }
 
-        match self.state {
+        match self.state() {
             CpuState::Arm => self.step_arm(bus),
             CpuState::Thumb => self.step_thumb(bus),
         }
@@ -56,7 +54,11 @@ impl Cpu {
     }
 
     pub fn state(&self) -> CpuState {
-        self.state
+        if self.registers.cpsr().thumb_state() {
+            CpuState::Thumb
+        } else {
+            CpuState::Arm
+        }
     }
 
     fn step_arm(&mut self, bus: &mut Bus) -> u32 {
@@ -151,6 +153,7 @@ impl Default for Cpu {
 #[cfg(test)]
 mod tests {
     use super::Cpu;
+    use super::CpuState;
     use super::Registers;
     use crate::bus::Bus;
 
@@ -203,6 +206,31 @@ mod tests {
         cpu.step(&mut bus);
 
         assert_eq!(cpu.registers().pc(), 0x0200_0008);
+    }
+
+    #[test]
+    fn failed_conditional_bx_does_not_branch() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * BXEQ R0
+         *
+         * Z is clear, so the instruction is skipped.
+         */
+        bus.write32(0x0200_0000, 0x012F_FF10);
+
+        cpu.registers_mut().write(0, 0x0800_0101);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.registers_mut().cpsr_mut().set_zero(false);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_0004);
+
+        assert_eq!(cpu.state(), CpuState::Arm);
     }
 
     #[test]
@@ -297,5 +325,47 @@ mod tests {
         assert_eq!(cpu.registers().pc(), 0x0200_000C);
 
         assert_eq!(cpu.registers().read(Registers::LR), 0x0200_0004);
+    }
+
+    #[test]
+    fn cpu_executes_bx_and_enters_thumb_state() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * BX R0
+         */
+        bus.write32(0x0200_0000, 0xE12F_FF10);
+
+        cpu.registers_mut().write(0, 0x0800_0101);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().pc(), 0x0800_0100);
+
+        assert_eq!(cpu.state(), CpuState::Thumb);
+
+        assert!(cpu.registers().cpsr().thumb_state());
+    }
+
+    #[test]
+    fn cpu_executes_bx_and_stays_in_arm_state() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        // BX R0
+        bus.write32(0x0200_0000, 0xE12F_FF10);
+
+        cpu.registers_mut().write(0, 0x0800_0102);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().pc(), 0x0800_0100);
+
+        assert_eq!(cpu.state(), CpuState::Arm);
     }
 }

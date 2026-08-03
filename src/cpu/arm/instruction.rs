@@ -1,13 +1,12 @@
-use super::{ArmCondition, BranchInstruction, DataProcessingInstruction};
+use super::{
+    ArmCondition, BranchExchangeInstruction, BranchInstruction, DataProcessingInstruction,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmInstruction {
     DataProcessing(DataProcessingInstruction),
 
-    BranchExchange {
-        condition: ArmCondition,
-        register: u8,
-    },
+    BranchExchange(BranchExchangeInstruction),
 
     Multiply {
         condition: ArmCondition,
@@ -74,8 +73,9 @@ impl ArmInstruction {
 
             Self::Branch(instruction) => instruction.condition,
 
-            Self::BranchExchange { condition, .. }
-            | Self::Multiply { condition, .. }
+            Self::BranchExchange(instruction) => instruction.condition,
+
+            Self::Multiply { condition, .. }
             | Self::MultiplyLong { condition, .. }
             | Self::SingleDataSwap { condition, .. }
             | Self::HalfwordDataTransfer { condition, .. }

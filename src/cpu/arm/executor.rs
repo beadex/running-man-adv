@@ -1,12 +1,15 @@
 use crate::cpu::Registers;
 
 use super::{
-    ArmInstruction, DataProcessingExecutionError, execute_branch, execute_data_processing,
+    ArmInstruction, BranchExchangeExecutionError, DataProcessingExecutionError, execute_branch,
+    execute_branch_exchange, execute_data_processing,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmExecutionError {
     DataProcessing(DataProcessingExecutionError),
+
+    BranchExchange(BranchExchangeExecutionError),
 
     UnimplementedInstruction,
 }
@@ -26,6 +29,12 @@ pub fn execute_arm(
             execute_branch(registers, *instruction, instruction_address);
 
             Ok(())
+        }
+
+        ArmInstruction::BranchExchange(instruction) => {
+            execute_branch_exchange(registers, *instruction)
+                .map(|_| ())
+                .map_err(ArmExecutionError::BranchExchange)
         }
 
         _ => Err(ArmExecutionError::UnimplementedInstruction),

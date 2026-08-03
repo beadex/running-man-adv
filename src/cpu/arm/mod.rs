@@ -1,6 +1,8 @@
 mod alu;
 mod barrel_shifter;
 mod branch;
+mod branch_exchange;
+mod branch_exchange_executor;
 mod branch_executor;
 mod data_processing;
 mod data_processing_executor;
@@ -17,7 +19,15 @@ pub use self::barrel_shifter::{
 
 pub use self::branch::{BranchDecodeError, BranchInstruction, decode_branch};
 
+pub use self::branch_exchange::{
+    BranchExchangeDecodeError, BranchExchangeInstruction, decode_branch_exchange,
+};
+
 pub use self::branch_executor::{BranchExecutionResult, execute_branch};
+
+pub use self::branch_exchange_executor::{
+    BranchExchangeExecutionError, BranchExchangeExecutionResult, execute_branch_exchange,
+};
 
 pub use self::data_processing::{
     DataProcessingDecodeError, DataProcessingInstruction, DataProcessingOpcode, Operand2,
