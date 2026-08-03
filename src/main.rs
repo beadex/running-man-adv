@@ -27,7 +27,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_args(env::args_os())?;
 
     let bios = load_bios_file(&config.bios_path)?;
@@ -50,20 +50,14 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let mut cpu = Cpu::new();
 
-    /*
-     * A real GBA power-on begins execution from BIOS address 0x00000000
-     * in ARM state.
-     */
     cpu.reset();
     cpu.registers_mut().set_pc(0x0000_0000);
 
-    let cycles = cpu.step(&mut bus);
+    loop {
+        cpu.step(&mut bus);
+    }
 
-    println!(
-        "First instruction fetched: cycles={cycles}, next_pc=0x{:08X}",
-        cpu.registers().pc()
-    );
-
+    #[allow(unreachable_code)]
     Ok(())
 }
 

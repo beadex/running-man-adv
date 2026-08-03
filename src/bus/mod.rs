@@ -1,314 +1,388 @@
+use std::error::Error;
+use std::fmt;
+
+mod interrupt;
+mod io;
 mod memory;
 
-pub use memory::MemoryLoadError;
+pub use self::interrupt::{InterruptController, InterruptSource};
 
-pub(crate) use memory::{BIOS_SIZE, GAME_PAK_ROM_MAX_SIZE};
+pub use self::io::IoRegisters;
 
-use memory::{
-    EWRAM_SIZE, IO_SIZE, IWRAM_SIZE, Memory, OAM_SIZE, PALETTE_RAM_SIZE, SRAM_SIZE, VRAM_SIZE,
-};
+pub(crate) const GAME_PAK_ROM_MAX_SIZE: usize = 32 * 1024 * 1024;
 
-const BIOS_START: u32 = 0x0000_0000;
-const BIOS_END: u32 = 0x0000_3FFF;
+const BIOS_BASE: u32 = 0x0000_0000;
+pub(crate) const BIOS_SIZE: usize = 0x0000_4000;
 
-const EWRAM_START: u32 = 0x0200_0000;
-const EWRAM_END: u32 = 0x02FF_FFFF;
+const EWRAM_BASE: u32 = 0x0200_0000;
+const EWRAM_SIZE: usize = 0x0004_0000;
 
-const IWRAM_START: u32 = 0x0300_0000;
-const IWRAM_END: u32 = 0x03FF_FFFF;
+const IWRAM_BASE: u32 = 0x0300_0000;
+const IWRAM_SIZE: usize = 0x0000_8000;
 
-const IO_START: u32 = 0x0400_0000;
-const IO_END: u32 = 0x04FF_FFFF;
+const PALETTE_BASE: u32 = 0x0500_0000;
+const PALETTE_SIZE: usize = 0x0000_0400;
 
-const PALETTE_RAM_START: u32 = 0x0500_0000;
-const PALETTE_RAM_END: u32 = 0x05FF_FFFF;
+const VRAM_BASE: u32 = 0x0600_0000;
+const VRAM_SIZE: usize = 0x0001_8000;
 
-const VRAM_START: u32 = 0x0600_0000;
-const VRAM_END: u32 = 0x06FF_FFFF;
+const OAM_BASE: u32 = 0x0700_0000;
+const OAM_SIZE: usize = 0x0000_0400;
 
-const OAM_START: u32 = 0x0700_0000;
-const OAM_END: u32 = 0x07FF_FFFF;
+const ROM_BASE: u32 = 0x0800_0000;
+const ROM_END: u32 = 0x0DFF_FFFF;
 
-const GAME_PAK_ROM_START: u32 = 0x0800_0000;
-const GAME_PAK_ROM_END: u32 = 0x0DFF_FFFF;
+const SRAM_BASE: u32 = 0x0E00_0000;
+const SRAM_SIZE: usize = 0x0001_0000;
 
-const SRAM_START: u32 = 0x0E00_0000;
-const SRAM_END: u32 = 0x0EFF_FFFF;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BusLoadError {
+    InvalidBiosSize { expected: usize, actual: usize },
 
-#[derive(Debug)]
+    RomTooLarge { maximum: usize, actual: usize },
+}
+
+impl fmt::Display for BusLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidBiosSize { expected, actual } => {
+                write!(
+                    formatter,
+                    "invalid BIOS size: expected {expected} bytes, got {actual} bytes"
+                )
+            }
+
+            Self::RomTooLarge { maximum, actual } => {
+                write!(
+                    formatter,
+                    "ROM is too large: maximum {maximum} bytes, got {actual} bytes"
+                )
+            }
+        }
+    }
+}
+
+impl Error for BusLoadError {}
+
+#[derive(Debug, Clone)]
 pub struct Bus {
-    memory: Memory,
+    bios: Box<[u8; BIOS_SIZE]>,
+    ewram: Box<[u8; EWRAM_SIZE]>,
+    iwram: Box<[u8; IWRAM_SIZE]>,
+
+    io: IoRegisters,
+
+    palette: Box<[u8; PALETTE_SIZE]>,
+    vram: Box<[u8; VRAM_SIZE]>,
+    oam: Box<[u8; OAM_SIZE]>,
+
+    rom: Vec<u8>,
+    sram: Box<[u8; SRAM_SIZE]>,
 }
 
 impl Bus {
+    pub const REG_IE: u32 = IoRegisters::BASE + IoRegisters::IE_OFFSET;
+
+    pub const REG_IF: u32 = IoRegisters::BASE + IoRegisters::IF_OFFSET;
+
+    pub const REG_IME: u32 = IoRegisters::BASE + IoRegisters::IME_OFFSET;
+
     pub fn new() -> Self {
         Self {
-            memory: Memory::new(),
+            bios: Box::new([0; BIOS_SIZE]),
+            ewram: Box::new([0; EWRAM_SIZE]),
+            iwram: Box::new([0; IWRAM_SIZE]),
+
+            io: IoRegisters::new(),
+
+            palette: Box::new([0; PALETTE_SIZE]),
+
+            vram: Box::new([0; VRAM_SIZE]),
+
+            oam: Box::new([0; OAM_SIZE]),
+
+            rom: Vec::new(),
+
+            sram: Box::new([0; SRAM_SIZE]),
         }
     }
 
-    pub fn load_bios(&mut self, data: &[u8]) -> Result<(), MemoryLoadError> {
-        self.memory.load_bios(data)
+    pub fn reset(&mut self) {
+        self.ewram.fill(0);
+        self.iwram.fill(0);
+        self.io.reset();
+        self.palette.fill(0);
+        self.vram.fill(0);
+        self.oam.fill(0);
+        self.sram.fill(0);
+
+        /*
+         * BIOS and cartridge ROM are preserved across reset.
+         */
     }
 
-    pub fn load_rom(&mut self, data: &[u8]) -> Result<(), MemoryLoadError> {
-        self.memory.load_rom(data)
+    pub fn load_bios(&mut self, bios: &[u8]) -> Result<(), BusLoadError> {
+        if bios.len() != BIOS_SIZE {
+            return Err(BusLoadError::InvalidBiosSize {
+                expected: BIOS_SIZE,
+                actual: bios.len(),
+            });
+        }
+
+        self.bios.copy_from_slice(bios);
+
+        Ok(())
+    }
+
+    pub fn load_rom(&mut self, rom: &[u8]) -> Result<(), BusLoadError> {
+        /*
+         * GBA cartridge ROM address space:
+         * 0x08000000..=0x0DFFFFFF
+         *
+         * Three wait-state regions mirror the cartridge.
+         * Maximum physical image size commonly modeled here is 32 MiB.
+         */
+        const MAX_ROM_SIZE: usize = 32 * 1024 * 1024;
+
+        if rom.len() > MAX_ROM_SIZE {
+            return Err(BusLoadError::RomTooLarge {
+                maximum: MAX_ROM_SIZE,
+                actual: rom.len(),
+            });
+        }
+
+        self.rom.clear();
+        self.rom.extend_from_slice(rom);
+
+        Ok(())
+    }
+
+    pub const fn io(&self) -> &IoRegisters {
+        &self.io
+    }
+
+    pub fn io_mut(&mut self) -> &mut IoRegisters {
+        &mut self.io
+    }
+
+    pub const fn interrupt_controller(&self) -> &InterruptController {
+        self.io.interrupts()
+    }
+
+    pub fn interrupt_controller_mut(&mut self) -> &mut InterruptController {
+        self.io.interrupts_mut()
+    }
+
+    pub fn request_interrupt(&mut self, source: InterruptSource) {
+        self.io.request_interrupt(source);
+    }
+
+    pub const fn irq_line(&self) -> bool {
+        self.io.irq_line()
     }
 
     pub fn read8(&self, address: u32) -> u8 {
         match address {
-            BIOS_START..=BIOS_END => {
-                let offset = address as usize % BIOS_SIZE;
-                self.memory.bios[offset]
+            BIOS_BASE..=0x0000_3FFF => {
+                let offset = (address - BIOS_BASE) as usize;
+
+                self.bios[offset]
             }
 
-            EWRAM_START..=EWRAM_END => {
-                let offset = (address - EWRAM_START) as usize % EWRAM_SIZE;
-                self.memory.ewram[offset]
+            0x0200_0000..=0x02FF_FFFF => {
+                let offset = mirror_offset(address, EWRAM_BASE, EWRAM_SIZE);
+
+                self.ewram[offset]
             }
 
-            IWRAM_START..=IWRAM_END => {
-                let offset = (address - IWRAM_START) as usize % IWRAM_SIZE;
-                self.memory.iwram[offset]
+            0x0300_0000..=0x03FF_FFFF => {
+                let offset = mirror_offset(address, IWRAM_BASE, IWRAM_SIZE);
+
+                self.iwram[offset]
             }
 
-            IO_START..=IO_END => {
-                let offset = (address - IO_START) as usize % IO_SIZE;
-                self.memory.io[offset]
+            address if IoRegisters::contains_address(address) => {
+                let offset = IoRegisters::address_to_offset(address);
+
+                self.io.read8(offset)
             }
 
-            PALETTE_RAM_START..=PALETTE_RAM_END => {
-                let offset = (address - PALETTE_RAM_START) as usize % PALETTE_RAM_SIZE;
-                self.memory.palette_ram[offset]
+            0x0500_0000..=0x05FF_FFFF => {
+                let offset = mirror_offset(address, PALETTE_BASE, PALETTE_SIZE);
+
+                self.palette[offset]
             }
 
-            VRAM_START..=VRAM_END => {
-                let offset = Self::map_vram_address(address);
-                self.memory.vram[offset]
+            0x0600_0000..=0x06FF_FFFF => {
+                let offset = vram_offset(address);
+
+                self.vram[offset]
             }
 
-            OAM_START..=OAM_END => {
-                let offset = (address - OAM_START) as usize % OAM_SIZE;
-                self.memory.oam[offset]
+            0x0700_0000..=0x07FF_FFFF => {
+                let offset = mirror_offset(address, OAM_BASE, OAM_SIZE);
+
+                self.oam[offset]
             }
 
-            GAME_PAK_ROM_START..=GAME_PAK_ROM_END => self.read_game_pak_rom(address),
+            ROM_BASE..=ROM_END => self.read_rom8(address),
 
-            SRAM_START..=SRAM_END => {
-                let offset = (address - SRAM_START) as usize % SRAM_SIZE;
-                self.memory.sram[offset]
+            0x0E00_0000..=0x0EFF_FFFF => {
+                let offset = mirror_offset(address, SRAM_BASE, SRAM_SIZE);
+
+                self.sram[offset]
             }
 
-            _ => self.read_open_bus(address),
+            _ => 0,
         }
-    }
-
-    pub fn read16(&self, address: u32) -> u16 {
-        let address = address & !1;
-
-        u16::from_le_bytes([self.read8(address), self.read8(address.wrapping_add(1))])
-    }
-
-    pub fn read32(&self, address: u32) -> u32 {
-        let address = address & !3;
-
-        u32::from_le_bytes([
-            self.read8(address),
-            self.read8(address.wrapping_add(1)),
-            self.read8(address.wrapping_add(2)),
-            self.read8(address.wrapping_add(3)),
-        ])
     }
 
     pub fn write8(&mut self, address: u32, value: u8) {
         match address {
-            BIOS_START..=BIOS_END => {
-                // BIOS is read-only.
+            /*
+             * BIOS is read-only.
+             */
+            BIOS_BASE..=0x0000_3FFF => {}
+
+            0x0200_0000..=0x02FF_FFFF => {
+                let offset = mirror_offset(address, EWRAM_BASE, EWRAM_SIZE);
+
+                self.ewram[offset] = value;
             }
 
-            EWRAM_START..=EWRAM_END => {
-                let offset = (address - EWRAM_START) as usize % EWRAM_SIZE;
-                self.memory.ewram[offset] = value;
+            0x0300_0000..=0x03FF_FFFF => {
+                let offset = mirror_offset(address, IWRAM_BASE, IWRAM_SIZE);
+
+                self.iwram[offset] = value;
             }
 
-            IWRAM_START..=IWRAM_END => {
-                let offset = (address - IWRAM_START) as usize % IWRAM_SIZE;
-                self.memory.iwram[offset] = value;
+            address if IoRegisters::contains_address(address) => {
+                let offset = IoRegisters::address_to_offset(address);
+
+                self.io.write8(offset, value);
             }
 
-            IO_START..=IO_END => {
-                let offset = (address - IO_START) as usize % IO_SIZE;
-                self.memory.io[offset] = value;
+            0x0500_0000..=0x05FF_FFFF => {
+                let offset = mirror_offset(address, PALETTE_BASE, PALETTE_SIZE);
+
+                self.palette[offset] = value;
             }
 
-            PALETTE_RAM_START..=PALETTE_RAM_END => {
-                self.write_palette8(address, value);
+            0x0600_0000..=0x06FF_FFFF => {
+                let offset = vram_offset(address);
+
+                self.vram[offset] = value;
             }
 
-            VRAM_START..=VRAM_END => {
-                self.write_vram8(address, value);
+            0x0700_0000..=0x07FF_FFFF => {
+                let offset = mirror_offset(address, OAM_BASE, OAM_SIZE);
+
+                self.oam[offset] = value;
             }
 
-            OAM_START..=OAM_END => {
-                // Byte writes to OAM are ignored.
-            }
+            /*
+             * Game Pak ROM is read-only.
+             */
+            ROM_BASE..=ROM_END => {}
 
-            GAME_PAK_ROM_START..=GAME_PAK_ROM_END => {
-                // Game Pak ROM is read-only.
-            }
+            0x0E00_0000..=0x0EFF_FFFF => {
+                let offset = mirror_offset(address, SRAM_BASE, SRAM_SIZE);
 
-            SRAM_START..=SRAM_END => {
-                let offset = (address - SRAM_START) as usize % SRAM_SIZE;
-                self.memory.sram[offset] = value;
-            }
-
-            _ => {
-                // Unmapped write: ignored for now.
-            }
-        }
-    }
-
-    pub fn write16(&mut self, address: u32, value: u16) {
-        let address = address & !1;
-        let bytes = value.to_le_bytes();
-
-        match address {
-            BIOS_START..=BIOS_END => {
-                // BIOS is read-only.
-            }
-
-            EWRAM_START..=EWRAM_END => {
-                let offset = (address - EWRAM_START) as usize % EWRAM_SIZE;
-                Self::write16_to_slice(&mut self.memory.ewram[..], offset, bytes);
-            }
-
-            IWRAM_START..=IWRAM_END => {
-                let offset = (address - IWRAM_START) as usize % IWRAM_SIZE;
-                Self::write16_to_slice(&mut self.memory.iwram[..], offset, bytes);
-            }
-
-            IO_START..=IO_END => {
-                let offset = (address - IO_START) as usize % IO_SIZE;
-                Self::write16_to_slice(&mut self.memory.io[..], offset, bytes);
-            }
-
-            PALETTE_RAM_START..=PALETTE_RAM_END => {
-                let offset = (address - PALETTE_RAM_START) as usize % PALETTE_RAM_SIZE;
-
-                Self::write16_to_slice(&mut self.memory.palette_ram[..], offset, bytes);
-            }
-
-            VRAM_START..=VRAM_END => {
-                let offset = Self::map_vram_address(address);
-                Self::write16_to_slice(&mut self.memory.vram[..], offset, bytes);
-            }
-
-            OAM_START..=OAM_END => {
-                let offset = (address - OAM_START) as usize % OAM_SIZE;
-                Self::write16_to_slice(&mut self.memory.oam[..], offset, bytes);
-            }
-
-            GAME_PAK_ROM_START..=GAME_PAK_ROM_END => {
-                // Game Pak ROM is read-only.
-            }
-
-            SRAM_START..=SRAM_END => {
-                /*
-                 * SRAM is physically 8-bit. For now, break wider writes
-                 * into byte writes. Accurate timing is added later.
-                 */
-                self.write8(address, bytes[0]);
-                self.write8(address.wrapping_add(1), bytes[1]);
+                self.sram[offset] = value;
             }
 
             _ => {}
         }
     }
 
+    pub fn read16(&self, address: u32) -> u16 {
+        let aligned = address & !1;
+
+        if IoRegisters::contains_address(aligned) {
+            let offset = IoRegisters::address_to_offset(aligned);
+
+            return self.io.read16(offset);
+        }
+
+        let low = self.read8(aligned);
+        let high = self.read8(aligned.wrapping_add(1));
+
+        u16::from_le_bytes([low, high])
+    }
+
+    pub fn write16(&mut self, address: u32, value: u16) {
+        let aligned = address & !1;
+
+        if IoRegisters::contains_address(aligned) {
+            let offset = IoRegisters::address_to_offset(aligned);
+
+            self.io.write16(offset, value);
+
+            return;
+        }
+
+        let [low, high] = value.to_le_bytes();
+
+        self.write8(aligned, low);
+
+        self.write8(aligned.wrapping_add(1), high);
+    }
+
+    pub fn read32(&self, address: u32) -> u32 {
+        let aligned = address & !3;
+
+        if IoRegisters::contains_address(aligned) {
+            let offset = IoRegisters::address_to_offset(aligned);
+
+            return self.io.read32(offset);
+        }
+
+        let b0 = self.read8(aligned);
+
+        let b1 = self.read8(aligned.wrapping_add(1));
+
+        let b2 = self.read8(aligned.wrapping_add(2));
+
+        let b3 = self.read8(aligned.wrapping_add(3));
+
+        u32::from_le_bytes([b0, b1, b2, b3])
+    }
+
     pub fn write32(&mut self, address: u32, value: u32) {
-        let address = address & !3;
-        let halfwords = [value as u16, (value >> 16) as u16];
+        let aligned = address & !3;
 
-        self.write16(address, halfwords[0]);
-        self.write16(address.wrapping_add(2), halfwords[1]);
+        if IoRegisters::contains_address(aligned) {
+            let offset = IoRegisters::address_to_offset(aligned);
+
+            self.io.write32(offset, value);
+
+            return;
+        }
+
+        let bytes = value.to_le_bytes();
+
+        for (index, byte) in bytes.into_iter().enumerate() {
+            self.write8(aligned.wrapping_add(index as u32), byte);
+        }
     }
 
-    fn read_game_pak_rom(&self, address: u32) -> u8 {
-        if self.memory.game_pak_rom.is_empty() {
-            return 0xFF;
+    fn read_rom8(&self, address: u32) -> u8 {
+        if self.rom.is_empty() {
+            return 0;
         }
 
         /*
-         * All three Game Pak ROM windows address the same maximum
-         * 32 MiB cartridge ROM.
+         * Wait-state regions:
          *
-         * 0x08000000..0x09FFFFFF
-         * 0x0A000000..0x0BFFFFFF
-         * 0x0C000000..0x0DFFFFFF
-         */
-        let offset = (address - GAME_PAK_ROM_START) as usize & 0x01FF_FFFF;
-
-        self.memory
-            .game_pak_rom
-            .get(offset)
-            .copied()
-            .unwrap_or(0xFF)
-    }
-
-    fn map_vram_address(address: u32) -> usize {
-        let mut offset = (address - VRAM_START) as usize & 0x0001_FFFF;
-
-        /*
-         * GBA exposes a 128 KiB VRAM address window, but only has
-         * 96 KiB of physical VRAM.
+         * 0x08000000
+         * 0x0A000000
+         * 0x0C000000
          *
-         * 0x06018000..0x0601FFFF mirrors 0x06010000..0x06017FFF.
+         * mirror the same physical ROM.
          */
-        if offset >= VRAM_SIZE {
-            offset -= 32 * 1024;
-        }
+        let offset = ((address - ROM_BASE) & 0x01FF_FFFF) as usize;
 
-        offset
-    }
-
-    fn write_palette8(&mut self, address: u32, value: u8) {
-        /*
-         * Palette RAM has a 16-bit data bus. An 8-bit write is
-         * replicated into both bytes of the addressed halfword.
-         */
-        let offset = (address - PALETTE_RAM_START) as usize % PALETTE_RAM_SIZE;
-        let aligned_offset = offset & !1;
-
-        self.memory.palette_ram[aligned_offset] = value;
-        self.memory.palette_ram[aligned_offset + 1] = value;
-    }
-
-    fn write_vram8(&mut self, address: u32, value: u8) {
-        /*
-         * VRAM also has a 16-bit data bus. An 8-bit write is
-         * replicated into both bytes of the addressed halfword.
-         */
-        let offset = Self::map_vram_address(address);
-        let aligned_offset = offset & !1;
-
-        self.memory.vram[aligned_offset] = value;
-        self.memory.vram[aligned_offset + 1] = value;
-    }
-
-    fn write16_to_slice(memory: &mut [u8], offset: usize, bytes: [u8; 2]) {
-        memory[offset] = bytes[0];
-        memory[(offset + 1) % memory.len()] = bytes[1];
-    }
-
-    fn read_open_bus(&self, _address: u32) -> u8 {
-        /*
-         * Placeholder.
-         *
-         * Accurate open-bus behaviour depends on the CPU pipeline and
-         * the most recently fetched bus value. Returning zero is enough
-         * while building the initial interpreter.
-         */
-        0
+        self.rom.get(offset).copied().unwrap_or(0)
     }
 }
 
@@ -318,153 +392,156 @@ impl Default for Bus {
     }
 }
 
+fn mirror_offset(address: u32, base: u32, size: usize) -> usize {
+    ((address - base) as usize) % size
+}
+
+fn vram_offset(address: u32) -> usize {
+    /*
+     * GBA VRAM is 96 KiB.
+     *
+     * The upper 32 KiB portion is mirrored within the
+     * 128 KiB VRAM address window.
+     */
+    let offset = ((address - VRAM_BASE) & 0x1_FFFF) as usize;
+
+    if offset >= VRAM_SIZE {
+        offset - 0x8000
+    } else {
+        offset
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Bus;
+    use super::{Bus, BusLoadError, InterruptController, InterruptSource};
 
     #[test]
-    fn ewram_can_be_read_and_written() {
+    fn bios_is_loaded_and_read_only() {
         let mut bus = Bus::new();
 
-        bus.write32(0x0200_0000, 0x1234_5678);
+        let mut bios = vec![0u8; 0x4000];
 
-        assert_eq!(bus.read8(0x0200_0000), 0x78);
-        assert_eq!(bus.read16(0x0200_0000), 0x5678);
-        assert_eq!(bus.read32(0x0200_0000), 0x1234_5678);
+        bios[8..12].copy_from_slice(&0xE1B0_F00Eu32.to_le_bytes());
+
+        bus.load_bios(&bios).unwrap();
+
+        assert_eq!(bus.read32(0x0000_0008), 0xE1B0_F00E);
+
+        bus.write32(0x0000_0008, 0xDEAD_BEEF);
+
+        assert_eq!(bus.read32(0x0000_0008), 0xE1B0_F00E);
+    }
+
+    #[test]
+    fn invalid_bios_size_is_rejected() {
+        let mut bus = Bus::new();
+
+        assert_eq!(
+            bus.load_bios(&[0; 16]),
+            Err(BusLoadError::InvalidBiosSize {
+                expected: 0x4000,
+                actual: 16,
+            })
+        );
     }
 
     #[test]
     fn ewram_is_mirrored() {
         let mut bus = Bus::new();
 
-        bus.write8(0x0200_1234, 0x42);
+        bus.write32(0x0200_0000, 0x1234_5678);
 
-        assert_eq!(bus.read8(0x0204_1234), 0x42);
-        assert_eq!(bus.read8(0x0208_1234), 0x42);
+        assert_eq!(bus.read32(0x0204_0000), 0x1234_5678);
     }
 
     #[test]
     fn iwram_is_mirrored() {
         let mut bus = Bus::new();
 
-        bus.write8(0x0300_1234, 0x7A);
+        bus.write32(0x0300_0000, 0x89AB_CDEF);
 
-        assert_eq!(bus.read8(0x0300_9234), 0x7A);
-        assert_eq!(bus.read8(0x0301_1234), 0x7A);
+        assert_eq!(bus.read32(0x0300_8000), 0x89AB_CDEF);
     }
 
     #[test]
-    fn bios_is_read_only() {
+    fn ie_is_mapped() {
         let mut bus = Bus::new();
 
-        let bios = vec![0xCC; 16 * 1024];
-        bus.load_bios(&bios).unwrap();
+        bus.write16(Bus::REG_IE, 0x1234);
 
-        assert_eq!(bus.read8(0), 0xCC);
-
-        bus.write8(0, 0x12);
-
-        assert_eq!(bus.read8(0), 0xCC);
+        assert_eq!(
+            bus.read16(Bus::REG_IE),
+            0x1234 & InterruptController::SUPPORTED_MASK
+        );
     }
 
     #[test]
-    fn rom_is_read_only() {
+    fn if_is_write_one_to_clear() {
         let mut bus = Bus::new();
 
-        bus.load_rom(&[0x11, 0x22, 0x33, 0x44]).unwrap();
+        bus.request_interrupt(InterruptSource::VBlank);
 
-        assert_eq!(bus.read32(0x0800_0000), 0x4433_2211);
+        bus.request_interrupt(InterruptSource::Timer0);
 
-        bus.write32(0x0800_0000, 0xDEAD_BEEF);
+        bus.write16(Bus::REG_IF, InterruptSource::VBlank.mask());
 
-        assert_eq!(bus.read32(0x0800_0000), 0x4433_2211);
+        assert_eq!(bus.read16(Bus::REG_IF), InterruptSource::Timer0.mask());
     }
 
     #[test]
-    fn game_pak_rom_windows_reference_same_rom() {
+    fn ime_is_mapped() {
         let mut bus = Bus::new();
 
-        bus.load_rom(&[0x12, 0x34, 0x56, 0x78]).unwrap();
+        bus.write16(Bus::REG_IME, 1);
 
-        assert_eq!(bus.read32(0x0800_0000), 0x7856_3412);
-        assert_eq!(bus.read32(0x0A00_0000), 0x7856_3412);
-        assert_eq!(bus.read32(0x0C00_0000), 0x7856_3412);
+        assert_eq!(bus.read16(Bus::REG_IME), 1);
     }
 
     #[test]
-    fn palette_byte_write_is_replicated() {
+    fn irq_line_comes_from_io_controller() {
         let mut bus = Bus::new();
 
-        bus.write8(0x0500_0001, 0xAB);
+        bus.write16(Bus::REG_IE, InterruptSource::Timer0.mask());
 
-        assert_eq!(bus.read16(0x0500_0000), 0xABAB);
+        bus.write16(Bus::REG_IME, 1);
+
+        bus.request_interrupt(InterruptSource::Timer0);
+
+        assert!(bus.irq_line());
+
+        bus.write16(Bus::REG_IF, InterruptSource::Timer0.mask());
+
+        assert!(!bus.irq_line());
     }
 
     #[test]
-    fn vram_byte_write_is_replicated() {
+    fn byte_access_to_ie_is_little_endian() {
         let mut bus = Bus::new();
 
-        bus.write8(0x0600_0001, 0xCD);
+        bus.write8(Bus::REG_IE, 0x34);
 
-        assert_eq!(bus.read16(0x0600_0000), 0xCDCD);
+        bus.write8(Bus::REG_IE + 1, 0x12);
+
+        assert_eq!(
+            bus.read16(Bus::REG_IE),
+            0x1234 & InterruptController::SUPPORTED_MASK
+        );
     }
 
     #[test]
-    fn oam_byte_write_is_ignored() {
+    fn word_access_to_ie_and_if_uses_register_semantics() {
         let mut bus = Bus::new();
 
-        bus.write8(0x0700_0000, 0xFF);
+        bus.request_interrupt(InterruptSource::Timer0);
 
-        assert_eq!(bus.read8(0x0700_0000), 0);
-    }
+        let value =
+            (InterruptSource::Timer0.mask() as u32) << 16 | InterruptSource::Timer0.mask() as u32;
 
-    #[test]
-    fn oam_halfword_write_succeeds() {
-        let mut bus = Bus::new();
+        bus.write32(Bus::REG_IE, value);
 
-        bus.write16(0x0700_0000, 0x1234);
+        assert_eq!(bus.read16(Bus::REG_IE), InterruptSource::Timer0.mask());
 
-        assert_eq!(bus.read16(0x0700_0000), 0x1234);
-    }
-
-    #[test]
-    fn vram_upper_region_is_mirrored() {
-        let mut bus = Bus::new();
-
-        bus.write16(0x0601_0000, 0xCAFE);
-
-        assert_eq!(bus.read16(0x0601_8000), 0xCAFE);
-    }
-
-    #[test]
-    fn sram_is_mirrored() {
-        let mut bus = Bus::new();
-
-        bus.write8(0x0E00_1234, 0x55);
-
-        assert_eq!(bus.read8(0x0E01_1234), 0x55);
-        assert_eq!(bus.read8(0x0E10_1234), 0x55);
-    }
-
-    #[test]
-    fn halfword_access_is_little_endian() {
-        let mut bus = Bus::new();
-
-        bus.write16(0x0200_0000, 0x1234);
-
-        assert_eq!(bus.read8(0x0200_0000), 0x34);
-        assert_eq!(bus.read8(0x0200_0001), 0x12);
-    }
-
-    #[test]
-    fn word_access_is_little_endian() {
-        let mut bus = Bus::new();
-
-        bus.write32(0x0200_0000, 0x1234_5678);
-
-        assert_eq!(bus.read8(0x0200_0000), 0x78);
-        assert_eq!(bus.read8(0x0200_0001), 0x56);
-        assert_eq!(bus.read8(0x0200_0002), 0x34);
-        assert_eq!(bus.read8(0x0200_0003), 0x12);
+        assert_eq!(bus.read16(Bus::REG_IF), 0);
     }
 }

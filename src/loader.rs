@@ -28,8 +28,16 @@ pub struct BiosImage {
 }
 
 impl BiosImage {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
     }
 }
 
@@ -46,6 +54,10 @@ impl RomImage {
 
     pub fn header(&self) -> &RomHeader {
         &self.header
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
     }
 }
 

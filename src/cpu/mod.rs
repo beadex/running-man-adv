@@ -1,11 +1,18 @@
 pub mod arm;
 mod cpsr;
+mod exception;
+mod exception_handler;
 mod mode;
 mod registers;
 
 use crate::bus::Bus;
 
 pub use self::cpsr::Cpsr;
+pub use self::exception::Exception;
+pub use self::exception_handler::{
+    ExceptionEntryResult, ExceptionError, ExceptionReturnResult, enter_exception,
+    return_from_exception,
+};
 pub use self::mode::{CpuMode, InvalidCpuMode};
 pub use self::registers::{Registers, SpsrAccessError};
 
@@ -36,13 +43,51 @@ impl Cpu {
         self.halted = false;
     }
 
+    fn try_enter_irq(&mut self, bus: &Bus) -> Option<u32> {
+        if !bus.irq_line() {
+            return None;
+        }
+
+        if self.registers.cpsr().irq_disabled() {
+            return None;
+        }
+
+        /*
+         * At the beginning of step(), PC points at the next
+         * instruction that would be executed.
+         *
+         * IRQ returns using:
+         *
+         *     SUBS PC, LR, #4
+         *
+         * Therefore:
+         *
+         * LR_irq = next instruction address + 4
+         */
+        let return_address = self.registers.pc().wrapping_add(4);
+
+        enter_exception(&mut self.registers, Exception::Irq, return_address)
+            .expect("IRQ mode must provide an SPSR");
+
+        Some(1)
+    }
+
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
+        /*
+         * Exception sampling happens before instruction fetch.
+         */
+        if let Some(cycles) = self.try_enter_irq(bus) {
+            self.halted = false;
+            return cycles;
+        }
+
         if self.halted {
             return 1;
         }
 
         match self.state() {
             CpuState::Arm => self.step_arm(bus),
+
             CpuState::Thumb => self.step_thumb(bus),
         }
     }
@@ -154,10 +199,8 @@ impl Default for Cpu {
 
 #[cfg(test)]
 mod tests {
-    use super::Cpu;
-    use super::CpuState;
-    use super::Registers;
-    use crate::bus::Bus;
+    use super::{Cpu, CpuMode, CpuState, Registers};
+    use crate::bus::{Bus, InterruptSource};
 
     #[test]
     fn arm_step_fetches_instruction_and_advances_pc() {
@@ -700,5 +743,212 @@ mod tests {
         assert_eq!(cpu.registers().read(0), 0xAAAA_AAAA);
 
         assert_eq!(cpu.registers().read(1), 0xBBBB_BBBB);
+    }
+
+    #[test]
+    fn cpu_executes_arm_software_interrupt() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * SWI #0x42
+         */
+        bus.write32(0x0200_0000, 0xEF00_0042);
+
+        cpu.registers_mut().cpsr_mut().set_mode(CpuMode::System);
+
+        cpu.registers_mut().cpsr_mut().set_irq_disabled(false);
+
+        let old_cpsr = cpu.registers().cpsr();
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().mode(), CpuMode::Supervisor);
+
+        assert_eq!(cpu.registers().pc(), 0x0000_0008);
+
+        assert_eq!(cpu.registers().read(Registers::LR), 0x0200_0004);
+
+        assert_eq!(cpu.registers().spsr().unwrap(), old_cpsr);
+
+        assert!(cpu.registers().cpsr().irq_disabled());
+    }
+
+    #[test]
+    fn cpu_enters_swi_handler_and_returns_with_movs_pc_lr() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * Application:
+         *
+         * 0x02000000: SWI #0
+         * 0x02000004: MOV R0, #42
+         */
+        bus.write32(0x0200_0000, 0xEF00_0000);
+
+        bus.write32(0x0200_0004, 0xE3A0_002A);
+
+        /*
+         * Exception vector:
+         *
+         * 0x00000008: MOVS PC, LR
+         */
+        let mut bios = vec![0u8; 0x4000];
+
+        /*
+         * SWI vector handler:
+         *
+         * 0x00000008: MOVS PC, LR
+         */
+        bios[0x08..0x0C].copy_from_slice(&0xE1B0_F00Eu32.to_le_bytes());
+
+        bus.load_bios(&bios).unwrap();
+
+        assert_eq!(bus.read32(0x0000_0008), 0xE1B0_F00E,);
+
+        cpu.registers_mut().cpsr_mut().set_mode(CpuMode::System);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        /*
+         * SWI entry.
+         */
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().pc(), 0x0000_0008);
+
+        assert_eq!(cpu.registers().mode(), CpuMode::Supervisor);
+
+        /*
+         * MOVS PC, LR.
+         */
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_0004);
+
+        assert_eq!(cpu.registers().mode(), CpuMode::System);
+
+        /*
+         * Execute instruction following SWI.
+         */
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(0), 42);
+    }
+
+    #[test]
+    fn cpu_accepts_irq_from_gba_interrupt_controller() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * Application instruction that must not execute
+         * before IRQ entry.
+         */
+        bus.write32(0x0200_0000, 0xE3A0_002A);
+
+        cpu.registers_mut().cpsr_mut().set_mode(CpuMode::System);
+
+        cpu.registers_mut().cpsr_mut().set_irq_disabled(false);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        let old_cpsr = cpu.registers().cpsr();
+
+        bus.write16(Bus::REG_IE, InterruptSource::Timer0.mask());
+
+        bus.write16(Bus::REG_IME, 1);
+
+        bus.request_interrupt(InterruptSource::Timer0);
+
+        assert!(bus.irq_line());
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(0), 0);
+
+        assert_eq!(cpu.registers().mode(), CpuMode::Irq);
+
+        assert_eq!(cpu.registers().pc(), 0x0000_0018);
+
+        assert_eq!(cpu.registers().read(Registers::LR), 0x0200_0004);
+
+        assert_eq!(cpu.registers().spsr().unwrap(), old_cpsr);
+
+        assert!(cpu.registers().cpsr().irq_disabled());
+
+        /*
+         * IF is not automatically cleared.
+         */
+        assert_eq!(bus.read16(Bus::REG_IF), InterruptSource::Timer0.mask());
+    }
+
+    #[test]
+    fn irq_handler_acknowledges_if_and_returns() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        let mut bios = vec![0u8; 0x4000];
+
+        /*
+         * IRQ vector:
+         *
+         * SUBS PC, LR, #4
+         */
+        bios[0x18..0x1C].copy_from_slice(&0xE25E_F004u32.to_le_bytes());
+
+        bus.load_bios(&bios).unwrap();
+
+        /*
+         * Interrupted instruction:
+         *
+         * MOV R0, #42
+         */
+        bus.write32(0x0200_0000, 0xE3A0_002A);
+
+        cpu.registers_mut().cpsr_mut().set_mode(CpuMode::System);
+
+        cpu.registers_mut().cpsr_mut().set_irq_disabled(false);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        bus.write16(Bus::REG_IE, InterruptSource::Timer0.mask());
+
+        bus.write16(Bus::REG_IME, 1);
+
+        bus.request_interrupt(InterruptSource::Timer0);
+
+        /*
+         * IRQ entry.
+         */
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().mode(), CpuMode::Irq);
+
+        /*
+         * Handler acknowledges Timer0 by writing one to IF.
+         */
+        bus.write16(Bus::REG_IF, InterruptSource::Timer0.mask());
+
+        assert!(!bus.irq_line());
+
+        /*
+         * Execute SUBS PC, LR, #4.
+         */
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().mode(), CpuMode::System);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_0000);
+
+        /*
+         * Execute interrupted instruction.
+         */
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(0), 42);
     }
 }

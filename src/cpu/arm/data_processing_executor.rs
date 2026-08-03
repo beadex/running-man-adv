@@ -1,4 +1,4 @@
-use crate::cpu::Registers;
+use crate::cpu::{ExceptionError, Registers, return_from_exception};
 
 use super::{
     AluFlags, DataProcessingInstruction, DataProcessingOpcode, Operand2, ShiftAmount, ShiftResult,
@@ -8,17 +8,12 @@ use super::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataProcessingExecutionError {
     /*
-     * Writing R15 has additional branch, pipeline refill, alignment,
-     * and CPSR/SPSR behavior. It is deferred until the pipeline and
-     * exception model exist.
-     */
-    DestinationIsProgramCounter,
-
-    /*
      * Reading R15 as Operand2 or shift register requires
      * pipeline-visible PC semantics.
      */
     OperandUsesProgramCounter,
+
+    ExceptionReturn(ExceptionError),
 }
 
 pub fn execute_data_processing(
@@ -46,7 +41,33 @@ pub fn execute_data_processing(
 
     if instruction.opcode.writes_result() {
         if instruction.rd as usize == Registers::PC {
-            return Err(DataProcessingExecutionError::DestinationIsProgramCounter);
+            if instruction.set_flags {
+                /*
+                 * Data-processing instruction with S=1 and Rd=PC:
+                 *
+                 * CPSR <- SPSR
+                 * PC   <- ALU result
+                 */
+                return_from_exception(registers, outcome.value)
+                    .map_err(DataProcessingExecutionError::ExceptionReturn)?;
+
+                return Ok(());
+            }
+
+            /*
+             * Ordinary data-processing write to PC.
+             *
+             * It remains in the current instruction-set state.
+             */
+            let target = if registers.cpsr().thumb_state() {
+                outcome.value & !1
+            } else {
+                outcome.value & !3
+            };
+
+            registers.set_pc(target);
+
+            return Ok(());
         }
 
         registers.write(instruction.rd as usize, outcome.value);
@@ -189,10 +210,10 @@ fn read_operand_register(
 
 #[cfg(test)]
 mod tests {
-    use super::{DataProcessingExecutionError, execute_data_processing};
+    use super::execute_data_processing;
 
     use crate::cpu::{
-        Registers,
+        CpuMode, Registers,
         arm::{DataProcessingOpcode, decode_data_processing},
     };
 
@@ -354,21 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_program_counter_destination_for_now() {
-        let mut registers = Registers::new();
-
-        // MOV PC, R0
-        let instruction = decode_data_processing(0xE1A0_F000).unwrap();
-
-        let result = execute_data_processing(&mut registers, instruction);
-
-        assert_eq!(
-            result,
-            Err(DataProcessingExecutionError::DestinationIsProgramCounter)
-        );
-    }
-
-    #[test]
     fn test_opcode_does_not_write_rd() {
         for opcode in [
             DataProcessingOpcode::Tst,
@@ -378,5 +384,42 @@ mod tests {
         ] {
             assert!(!opcode.writes_result());
         }
+    }
+
+    #[test]
+    fn movs_pc_lr_returns_from_exception() {
+        let mut registers = Registers::new();
+
+        registers.cpsr_mut().set_mode(CpuMode::System);
+
+        registers.cpsr_mut().set_thumb_state(true);
+
+        registers.cpsr_mut().set_zero(true);
+
+        let original_cpsr = registers.cpsr();
+
+        crate::cpu::enter_exception(
+            &mut registers,
+            crate::cpu::Exception::SoftwareInterrupt,
+            0x0800_0102,
+        )
+        .unwrap();
+
+        assert_eq!(registers.mode(), CpuMode::Supervisor);
+
+        /*
+         * MOVS PC, LR
+         */
+        let instruction = decode_data_processing(0xE1B0_F00E).unwrap();
+
+        execute_data_processing(&mut registers, instruction).unwrap();
+
+        assert_eq!(registers.cpsr(), original_cpsr);
+
+        assert_eq!(registers.pc(), 0x0800_0102);
+
+        assert_eq!(registers.mode(), CpuMode::System);
+
+        assert!(registers.cpsr().thumb_state());
     }
 }

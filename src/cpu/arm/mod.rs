@@ -20,6 +20,8 @@ mod multiply_long;
 mod multiply_long_executor;
 mod single_data_transfer;
 mod single_data_transfer_executor;
+mod software_interrupt;
+mod software_interrupt_executor;
 mod status_register;
 mod status_register_executor;
 
@@ -96,6 +98,12 @@ pub use self::single_data_transfer_executor::{
     SingleDataTransferExecutionError, SingleDataTransferExecutionResult,
     execute_single_data_transfer,
 };
+
+pub use self::software_interrupt::{
+    SoftwareInterruptDecodeError, SoftwareInterruptInstruction, decode_software_interrupt,
+};
+
+pub use self::software_interrupt_executor::execute_software_interrupt;
 
 pub use self::status_register::{
     ProgramStatusRegister, StatusRegisterDecodeError, StatusRegisterInstruction,

@@ -2,9 +2,10 @@ use super::{
     ArmInstruction, ArmInstructionKind, BlockDataTransferDecodeError, BranchDecodeError,
     BranchExchangeDecodeError, DataProcessingDecodeError, HalfwordDataTransferDecodeError,
     MultiplyDecodeError, MultiplyLongDecodeError, SingleDataTransferDecodeError,
-    StatusRegisterDecodeError, classify, condition, decode_block_data_transfer, decode_branch,
-    decode_branch_exchange, decode_data_processing, decode_halfword_data_transfer, decode_multiply,
-    decode_multiply_long, decode_single_data_transfer, decode_status_register,
+    SoftwareInterruptDecodeError, StatusRegisterDecodeError, classify, condition,
+    decode_block_data_transfer, decode_branch, decode_branch_exchange, decode_data_processing,
+    decode_halfword_data_transfer, decode_multiply, decode_multiply_long,
+    decode_single_data_transfer, decode_software_interrupt, decode_status_register,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub enum ArmDecodeError {
     Multiply(MultiplyDecodeError),
     MultiplyLong(MultiplyLongDecodeError),
     SingleDataTransfer(SingleDataTransferDecodeError),
+    SoftwareInterrupt(SoftwareInterruptDecodeError),
     StatusRegister(StatusRegisterDecodeError),
 }
 
@@ -79,6 +81,13 @@ pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
             Ok(ArmInstruction::SingleDataTransfer(decoded))
         }
 
+        ArmInstructionKind::SoftwareInterrupt => {
+            let decoded = decode_software_interrupt(instruction)
+                .map_err(ArmDecodeError::SoftwareInterrupt)?;
+
+            Ok(ArmInstruction::SoftwareInterrupt(decoded))
+        }
+
         ArmInstructionKind::StatusRegister => {
             let decoded =
                 decode_status_register(instruction).map_err(ArmDecodeError::StatusRegister)?;
@@ -111,11 +120,6 @@ pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
                 raw: instruction,
             })
         }
-
-        ArmInstructionKind::SoftwareInterrupt => Ok(ArmInstruction::SoftwareInterrupt {
-            condition,
-            comment: instruction & 0x00FF_FFFF,
-        }),
 
         ArmInstructionKind::Undefined => Ok(ArmInstruction::Undefined {
             condition,
@@ -168,19 +172,6 @@ mod tests {
                 condition: ArmCondition::Always,
                 register: 14,
             })
-        );
-    }
-
-    #[test]
-    fn decodes_software_interrupt_comment() {
-        let instruction = decode_arm(0xEF12_3456).unwrap();
-
-        assert_eq!(
-            instruction,
-            ArmInstruction::SoftwareInterrupt {
-                condition: ArmCondition::Always,
-                comment: 0x0012_3456,
-            }
         );
     }
 

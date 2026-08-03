@@ -1,14 +1,19 @@
 use super::{
     ArmCondition, BlockDataTransferInstruction, BranchExchangeInstruction, BranchInstruction,
     DataProcessingInstruction, HalfwordDataTransferInstruction, MultiplyInstruction,
-    MultiplyLongInstruction, SingleDataTransferInstruction, StatusRegisterInstruction,
+    MultiplyLongInstruction, SingleDataTransferInstruction, SoftwareInterruptInstruction,
+    StatusRegisterInstruction,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmInstruction {
     BlockDataTransfer(BlockDataTransferInstruction),
+
     BranchExchange(BranchExchangeInstruction),
+
     DataProcessing(DataProcessingInstruction),
+
+    HalfwordDataTransfer(HalfwordDataTransferInstruction),
 
     Multiply(MultiplyInstruction),
 
@@ -16,41 +21,21 @@ pub enum ArmInstruction {
 
     SingleDataTransfer(SingleDataTransferInstruction),
 
-    HalfwordDataTransfer(HalfwordDataTransferInstruction),
+    SoftwareInterrupt(SoftwareInterruptInstruction),
 
     StatusRegister(StatusRegisterInstruction),
 
-    SingleDataSwap {
-        condition: ArmCondition,
-        raw: u32,
-    },
+    SingleDataSwap { condition: ArmCondition, raw: u32 },
 
     Branch(BranchInstruction),
 
-    CoprocessorDataTransfer {
-        condition: ArmCondition,
-        raw: u32,
-    },
+    CoprocessorDataTransfer { condition: ArmCondition, raw: u32 },
 
-    CoprocessorDataOperation {
-        condition: ArmCondition,
-        raw: u32,
-    },
+    CoprocessorDataOperation { condition: ArmCondition, raw: u32 },
 
-    CoprocessorRegisterTransfer {
-        condition: ArmCondition,
-        raw: u32,
-    },
+    CoprocessorRegisterTransfer { condition: ArmCondition, raw: u32 },
 
-    SoftwareInterrupt {
-        condition: ArmCondition,
-        comment: u32,
-    },
-
-    Undefined {
-        condition: ArmCondition,
-        raw: u32,
-    },
+    Undefined { condition: ArmCondition, raw: u32 },
 }
 
 impl ArmInstruction {
@@ -72,13 +57,14 @@ impl ArmInstruction {
 
             Self::SingleDataTransfer(instruction) => instruction.condition,
 
+            Self::SoftwareInterrupt(instruction) => instruction.condition,
+
             Self::StatusRegister(instruction) => instruction.condition(),
 
             Self::SingleDataSwap { condition, .. }
             | Self::CoprocessorDataTransfer { condition, .. }
             | Self::CoprocessorDataOperation { condition, .. }
             | Self::CoprocessorRegisterTransfer { condition, .. }
-            | Self::SoftwareInterrupt { condition, .. }
             | Self::Undefined { condition, .. } => condition,
         }
     }

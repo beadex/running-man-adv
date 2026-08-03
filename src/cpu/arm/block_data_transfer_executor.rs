@@ -1,4 +1,4 @@
-use crate::{bus::Bus, cpu::Registers};
+use crate::{bus::Bus, cpu::ExceptionError, cpu::Registers, cpu::return_from_exception};
 
 use super::{BlockAddressingMode, BlockDataTransferInstruction};
 
@@ -13,9 +13,10 @@ pub struct BlockDataTransferExecutionResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockDataTransferExecutionError {
-    PsrOrUserModeNotImplemented,
+    UserBankTransferNotImplemented,
     ProgramCounterAsBase,
     WriteBackBaseInRegisterList,
+    ExceptionReturn(ExceptionError),
 }
 
 pub fn execute_block_data_transfer(
@@ -24,16 +25,12 @@ pub fn execute_block_data_transfer(
     instruction: BlockDataTransferInstruction,
     instruction_address: u32,
 ) -> Result<BlockDataTransferExecutionResult, BlockDataTransferExecutionError> {
-    if instruction.psr_or_user_mode {
-        /*
-         * S=1 has two possible meanings:
-         *
-         * - Transfer User-mode banked registers.
-         * - LDM including PC restores CPSR from SPSR.
-         *
-         * Both require CPU modes, banked registers and SPSRs.
-         */
-        return Err(BlockDataTransferExecutionError::PsrOrUserModeNotImplemented);
+    let exception_return = instruction.psr_or_user_mode
+        && instruction.load
+        && instruction.registers.contains(Registers::PC as u8);
+
+    if instruction.psr_or_user_mode && !exception_return {
+        return Err(BlockDataTransferExecutionError::UserBankTransferNotImplemented);
     }
 
     if instruction.rn as usize == Registers::PC {
@@ -75,7 +72,8 @@ pub fn execute_block_data_transfer(
     }
 
     let mut address = first_address;
-    let mut branch = false;
+
+    let mut loaded_pc = None;
 
     for register in 0u8..16 {
         if !instruction.registers.contains(register) {
@@ -86,11 +84,7 @@ pub fn execute_block_data_transfer(
             let value = bus.read32(address);
 
             if register as usize == Registers::PC {
-                /*
-                 * ARMv4 LDM loading PC retains ARM state when S=0.
-                 */
-                registers.set_pc(value & !3);
-                branch = true;
+                loaded_pc = Some(value);
             } else {
                 registers.write(register as usize, value);
             }
@@ -104,6 +98,22 @@ pub fn execute_block_data_transfer(
     if instruction.write_back {
         registers.write(instruction.rn as usize, write_back_value);
     }
+
+    let branch = if let Some(raw_pc) = loaded_pc {
+        if exception_return {
+            return_from_exception(registers, raw_pc)
+                .map_err(BlockDataTransferExecutionError::ExceptionReturn)?;
+        } else {
+            /*
+             * Ordinary ARMv4 LDM PC does not exchange state.
+             */
+            registers.set_pc(raw_pc & !3);
+        }
+
+        true
+    } else {
+        false
+    };
 
     Ok(BlockDataTransferExecutionResult {
         first_address,
@@ -156,7 +166,7 @@ mod tests {
     use crate::{
         bus::Bus,
         cpu::{
-            Registers,
+            CpuMode, Registers,
             arm::{BlockAddressingMode, decode_block_data_transfer},
         },
     };
@@ -350,22 +360,45 @@ mod tests {
     }
 
     #[test]
-    fn rejects_s_bit_until_banked_registers_exist() {
+    fn ldm_with_pc_and_s_bit_returns_from_exception() {
         let mut registers = Registers::new();
         let mut bus = Bus::new();
 
+        registers.cpsr_mut().set_mode(CpuMode::System);
+
+        registers.cpsr_mut().set_thumb_state(true);
+
+        let original_cpsr = registers.cpsr();
+
+        crate::cpu::enter_exception(
+            &mut registers,
+            crate::cpu::Exception::SoftwareInterrupt,
+            0x0800_0102,
+        )
+        .unwrap();
+
+        registers.write(Registers::SP, 0x0300_7FFC);
+
+        bus.write32(0x0300_7FFC, 0x0800_0103);
+
         /*
-         * LDMIA R0!, {R1, R2}^
+         * LDMIA SP!, {PC}^
+         *
+         * P=0 U=1 S=1 W=1 L=1
+         * Rn=SP
+         * list={PC}
          */
-        let instruction = decode_block_data_transfer(0xE8F0_0006).unwrap();
+        let instruction = decode_block_data_transfer(0xE8FD_8000).unwrap();
 
-        let result =
-            execute_block_data_transfer(&mut registers, &mut bus, instruction, 0x0800_0000);
+        execute_block_data_transfer(&mut registers, &mut bus, instruction, 0x0000_0100).unwrap();
 
-        assert_eq!(
-            result,
-            Err(BlockDataTransferExecutionError::PsrOrUserModeNotImplemented)
-        );
+        assert_eq!(registers.cpsr(), original_cpsr);
+
+        assert_eq!(registers.mode(), CpuMode::System);
+
+        assert!(registers.cpsr().thumb_state());
+
+        assert_eq!(registers.pc(), 0x0800_0102);
     }
 
     #[test]
