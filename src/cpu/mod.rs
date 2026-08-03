@@ -43,6 +43,18 @@ impl Cpu {
         self.halted = false;
     }
 
+    pub const fn is_halted(&self) -> bool {
+        self.halted
+    }
+
+    pub fn enter_halt(&mut self) {
+        self.halted = true;
+    }
+
+    pub fn wake_from_halt(&mut self) {
+        self.halted = false;
+    }
+
     fn try_enter_irq(&mut self, bus: &Bus) -> Option<u32> {
         if !bus.irq_line() {
             return None;
@@ -74,15 +86,27 @@ impl Cpu {
 
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
         /*
-         * Exception sampling happens before instruction fetch.
+         * HALT wake-up is separate from IRQ exception acceptance.
+         *
+         * An enabled pending source can wake the CPU even when IME is
+         * clear or CPSR.I masks IRQ exception entry.
          */
-        if let Some(cycles) = self.try_enter_irq(bus) {
-            self.halted = false;
-            return cycles;
+        if self.halted {
+            if bus.halt_wake_requested() {
+                self.halted = false;
+            } else {
+                /*
+                 * Peripheral clocks continue advancing through Gba::step.
+                 */
+                return 1;
+            }
         }
 
-        if self.halted {
-            return 1;
+        /*
+         * After waking, attempt actual IRQ exception entry.
+         */
+        if let Some(cycles) = self.try_enter_irq(bus) {
+            return cycles;
         }
 
         match self.state() {

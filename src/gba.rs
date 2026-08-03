@@ -1,5 +1,8 @@
 use crate::{
-    bus::{Bus, BusLoadError, InterruptController, InterruptSource, IoRegisters},
+    bus::{
+        Bus, BusLoadError, InterruptController, InterruptSource, IoRegisters, Key,
+        PowerStateRequest,
+    },
     cpu::{Cpu, CpuState, Registers},
 };
 
@@ -79,17 +82,23 @@ impl Gba {
             return 0;
         }
 
-        /*
-         * DMA owns the memory bus while active, so CPU does not execute
-         * during this scheduling step.
-         */
         let cycles = if let Some(dma_result) = self.bus.run_pending_dma() {
             dma_result.cycles
         } else {
             self.cpu.step(&mut self.bus)
         };
 
+        /*
+         * Peripheral clocks advance for both CPU and DMA cycles, and also
+         * during HALT placeholder cycles.
+         */
         self.bus.tick(cycles);
+
+        /*
+         * Apply HALTCNT written during the CPU or DMA operation only after
+         * that operation has completed.
+         */
+        self.apply_power_request();
 
         self.elapsed_cycles = self.elapsed_cycles.wrapping_add(cycles as u64);
 
@@ -202,6 +211,43 @@ impl Gba {
     pub fn request_interrupt(&mut self, source: InterruptSource) {
         self.bus.request_interrupt(source);
     }
+
+    fn apply_power_request(&mut self) {
+        let Some(request) = self.bus.take_power_request() else {
+            return;
+        };
+
+        match request {
+            PowerStateRequest::Halt => {
+                self.cpu.enter_halt();
+            }
+
+            PowerStateRequest::Stop => {
+                /*
+                 * STOP requires a more complete low-power clock model.
+                 * Treat it as HALT temporarily, but keep the distinction
+                 * in the MMIO model.
+                 */
+                self.cpu.enter_halt();
+            }
+        }
+    }
+
+    pub fn set_key(&mut self, key: Key, pressed: bool) {
+        self.bus.set_key(key, pressed);
+    }
+
+    pub fn press_key(&mut self, key: Key) {
+        self.set_key(key, true);
+    }
+
+    pub fn release_key(&mut self, key: Key) {
+        self.set_key(key, false);
+    }
+
+    pub fn set_pressed_keys(&mut self, pressed_mask: u16) {
+        self.bus.set_pressed_keys(pressed_mask);
+    }
 }
 
 impl Default for Gba {
@@ -215,7 +261,7 @@ mod tests {
     use super::Gba;
 
     use crate::{
-        bus::{Bus, InterruptSource},
+        bus::{Bus, InterruptSource, Key},
         cpu::{CpuMode, Registers},
     };
 
@@ -380,5 +426,117 @@ mod tests {
         assert_eq!(gba.registers().read(0), 42);
 
         assert_eq!(gba.registers().pc(), 0x0200_0004);
+    }
+
+    #[test]
+    fn guest_can_enter_halt_through_haltcnt() {
+        let mut gba = Gba::new();
+
+        /*
+         * STRB R0, [R1]
+         */
+        gba.bus_mut().write32(0x0200_0000, 0xE5C1_0000);
+
+        gba.registers_mut().write(0, 0);
+
+        gba.registers_mut().write(1, Bus::REG_HALTCNT);
+
+        gba.registers_mut().set_pc(0x0200_0000);
+
+        gba.step();
+
+        assert!(gba.cpu().is_halted(),);
+
+        assert_eq!(gba.registers().pc(), 0x0200_0004,);
+    }
+
+    #[test]
+    fn keypad_interrupt_wakes_halted_cpu() {
+        let mut gba = Gba::new();
+
+        /*
+         * NOP at resume address.
+         */
+        gba.bus_mut().write32(0x0200_0000, 0xE1A0_0000);
+
+        gba.registers_mut().set_pc(0x0200_0000);
+
+        /*
+         * Enable Keypad in IE.
+         *
+         * Deliberately leave IME clear to prove that IE&IF can wake HALT
+         * without necessarily entering IRQ.
+         */
+        gba.bus_mut()
+            .write16(Bus::REG_IE, InterruptSource::Keypad.mask());
+
+        gba.bus_mut()
+            .write16(Bus::REG_KEYCNT, Key::Start.mask() | (1 << 14));
+
+        gba.cpu_mut().enter_halt();
+
+        let old_pc = gba.registers().pc();
+
+        /*
+         * No interrupt yet, so CPU remains halted.
+         */
+        gba.step();
+
+        assert!(gba.cpu().is_halted(),);
+
+        assert_eq!(gba.registers().pc(), old_pc,);
+
+        /*
+         * Start press sets IF.Keypad.
+         */
+        gba.press_key(Key::Start);
+
+        assert!(gba.bus().halt_wake_requested(),);
+
+        /*
+         * IME is zero, so CPU wakes but does not enter IRQ.
+         * It executes the NOP at the resume address.
+         */
+        gba.step();
+
+        assert!(!gba.cpu().is_halted(),);
+
+        assert_eq!(gba.registers().pc(), 0x0200_0004,);
+    }
+
+    #[test]
+    fn keypad_interrupt_can_wake_halt_and_enter_irq() {
+        let mut gba = Gba::new();
+
+        gba.registers_mut().cpsr_mut().set_mode(CpuMode::System);
+
+        gba.registers_mut().cpsr_mut().set_irq_disabled(false);
+
+        gba.registers_mut().set_pc(0x0200_0000);
+
+        gba.bus_mut()
+            .write16(Bus::REG_IE, InterruptSource::Keypad.mask());
+
+        gba.bus_mut().write16(Bus::REG_IME, 1);
+
+        gba.bus_mut()
+            .write16(Bus::REG_KEYCNT, Key::Start.mask() | (1 << 14));
+
+        gba.cpu_mut().enter_halt();
+
+        gba.press_key(Key::Start);
+
+        gba.step();
+
+        assert!(!gba.cpu().is_halted(),);
+
+        assert_eq!(gba.registers().mode(), CpuMode::Irq,);
+
+        assert_eq!(gba.registers().pc(), 0x0000_0018,);
+
+        assert_ne!(
+            gba.bus().read16(Bus::REG_IF) & InterruptSource::Keypad.mask(),
+            0,
+        );
     }
 }

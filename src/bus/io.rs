@@ -1,6 +1,6 @@
 use super::{
-    DmaChannelIndex, DmaController, DmaStartTiming, InterruptController, InterruptSource, Ppu,
-    TimerController, TimerIndex,
+    DmaChannelIndex, DmaController, DmaStartTiming, InterruptController, InterruptSource, Key,
+    Keypad, KeypadUpdateResult, PowerControl, PowerStateRequest, Ppu, TimerController, TimerIndex,
 };
 
 #[derive(Debug, Clone)]
@@ -10,6 +10,8 @@ pub struct IoRegisters {
     timers: TimerController,
     dma: DmaController,
     ppu: Ppu,
+    keypad: Keypad,
+    power: PowerControl,
 }
 
 impl IoRegisters {
@@ -55,6 +57,12 @@ impl IoRegisters {
     pub const DISPSTAT_OFFSET: u32 = 0x0004;
     pub const VCOUNT_OFFSET: u32 = 0x0006;
 
+    pub const KEYINPUT_OFFSET: u32 = 0x0130;
+    pub const KEYCNT_OFFSET: u32 = 0x0132;
+
+    pub const POSTFLG_OFFSET: u32 = 0x0300;
+    pub const HALTCNT_OFFSET: u32 = 0x0301;
+
     pub fn new() -> Self {
         Self {
             raw: Box::new([0; Self::SIZE]),
@@ -62,6 +70,8 @@ impl IoRegisters {
             timers: TimerController::new(),
             dma: DmaController::new(),
             ppu: Ppu::new(),
+            keypad: Keypad::new(),
+            power: PowerControl::new(),
         }
     }
 
@@ -103,6 +113,43 @@ impl IoRegisters {
 
     pub fn ppu_mut(&mut self) -> &mut Ppu {
         &mut self.ppu
+    }
+    pub const fn keypad(&self) -> &Keypad {
+        &self.keypad
+    }
+
+    pub fn keypad_mut(&mut self) -> &mut Keypad {
+        &mut self.keypad
+    }
+
+    pub const fn power(&self) -> &PowerControl {
+        &self.power
+    }
+
+    pub fn power_mut(&mut self) -> &mut PowerControl {
+        &mut self.power
+    }
+
+    pub fn take_power_request(&mut self) -> Option<PowerStateRequest> {
+        self.power.take_request()
+    }
+
+    pub fn set_key(&mut self, key: Key, pressed: bool) {
+        let result = self.keypad.set_key(key, pressed);
+
+        self.apply_keypad_result(result);
+    }
+
+    pub fn set_pressed_keys(&mut self, pressed_mask: u16) {
+        let result = self.keypad.set_pressed_mask(pressed_mask);
+
+        self.apply_keypad_result(result);
+    }
+
+    fn apply_keypad_result(&mut self, result: KeypadUpdateResult) {
+        if result.interrupt_requests != 0 {
+            self.interrupts.request_mask(result.interrupt_requests);
+        }
     }
 
     pub fn tick(&mut self, cycles: u32) {
@@ -154,15 +201,30 @@ impl IoRegisters {
         self.timers.reset();
         self.dma.reset();
         self.ppu.reset();
+        self.keypad.reset();
+        self.power.reset();
     }
 
     pub fn read8(&self, offset: u32) -> u8 {
+        if offset == Self::POSTFLG_OFFSET {
+            return self.power.post_boot_flag();
+        }
+
+        if offset == Self::HALTCNT_OFFSET {
+            /*
+             * HALTCNT is write-only.
+             */
+            return 0;
+        }
+
         let aligned = offset & !1;
 
         if matches!(
             aligned,
             Self::DISPSTAT_OFFSET
                 | Self::VCOUNT_OFFSET
+                | Self::KEYINPUT_OFFSET
+                | Self::KEYCNT_OFFSET
                 | Self::IE_OFFSET
                 | Self::IF_OFFSET
                 | Self::IME_OFFSET
@@ -182,6 +244,18 @@ impl IoRegisters {
     }
 
     pub fn write8(&mut self, offset: u32, value: u8) {
+        if offset == Self::POSTFLG_OFFSET {
+            self.power.write_post_boot_flag(value);
+
+            return;
+        }
+
+        if offset == Self::HALTCNT_OFFSET {
+            self.power.write_halt_control(value);
+
+            return;
+        }
+
         let aligned = offset & !1;
         let high_byte = offset & 1 != 0;
 
@@ -194,10 +268,21 @@ impl IoRegisters {
             return;
         }
 
-        if aligned == Self::VCOUNT_OFFSET {
+        if aligned == Self::VCOUNT_OFFSET || aligned == Self::KEYINPUT_OFFSET {
             /*
-             * VCOUNT is read-only.
+             * Read-only.
              */
+            return;
+        }
+
+        if aligned == Self::KEYCNT_OFFSET {
+            let current = self.keypad.read_control();
+
+            let updated = replace_byte(current, high_byte, value);
+
+            let result = self.keypad.write_control(updated);
+
+            self.apply_keypad_result(result);
             return;
         }
 
@@ -303,6 +388,24 @@ impl IoRegisters {
                 return self.ppu.vcount();
             }
 
+            Self::KEYINPUT_OFFSET => {
+                return self.keypad.key_input();
+            }
+
+            Self::KEYCNT_OFFSET => {
+                return self.keypad.read_control();
+            }
+
+            /*
+             * POSTFLG and HALTCNT share one halfword.
+             *
+             * HALTCNT is write-only, so its read value is represented as
+             * zero in the high byte.
+             */
+            Self::POSTFLG_OFFSET => {
+                return self.power.post_boot_flag() as u16;
+            }
+
             _ => {}
         }
 
@@ -361,8 +464,38 @@ impl IoRegisters {
 
             Self::VCOUNT_OFFSET => {
                 /*
-                 * VCOUNT is read-only.
+                 * Read-only.
                  */
+                return;
+            }
+
+            Self::KEYINPUT_OFFSET => {
+                /*
+                 * Read-only.
+                 */
+                return;
+            }
+
+            Self::KEYCNT_OFFSET => {
+                let result = self.keypad.write_control(value);
+
+                self.apply_keypad_result(result);
+                return;
+            }
+
+            Self::POSTFLG_OFFSET => {
+                /*
+                 * A halfword write covers:
+                 *
+                 * low byte  -> POSTFLG
+                 * high byte -> HALTCNT
+                 */
+                let [postflg, haltcnt] = value.to_le_bytes();
+
+                self.power.write_post_boot_flag(postflg);
+
+                self.power.write_halt_control(haltcnt);
+
                 return;
             }
 
@@ -571,7 +704,8 @@ mod tests {
     use super::IoRegisters;
 
     use crate::bus::{
-        DmaChannelIndex, DmaTransferWidth, InterruptController, InterruptSource, Ppu, TimerIndex,
+        DmaChannelIndex, DmaTransferWidth, InterruptController, InterruptSource, Key,
+        PowerStateRequest, Ppu, TimerIndex,
     };
 
     #[test]
@@ -672,7 +806,7 @@ mod tests {
     fn unimplemented_io_registers_use_backing_storage() {
         let mut io = IoRegisters::new();
 
-        const UNIMPLEMENTED_OFFSET: u32 = 0x0300;
+        const UNIMPLEMENTED_OFFSET: u32 = 0x03F0;
 
         io.write16(UNIMPLEMENTED_OFFSET, 0xCAFE);
 
@@ -933,5 +1067,92 @@ mod tests {
             io.read16(IoRegisters::IF_OFFSET) & InterruptSource::HBlank.mask(),
             0,
         );
+    }
+
+    #[test]
+    fn keyinput_is_mapped_and_active_low() {
+        let mut io = IoRegisters::new();
+
+        assert_eq!(io.read16(IoRegisters::KEYINPUT_OFFSET,), 0x03FF,);
+
+        io.set_key(Key::A, true);
+
+        assert_eq!(io.read16(IoRegisters::KEYINPUT_OFFSET,) & Key::A.mask(), 0,);
+    }
+
+    #[test]
+    fn keycnt_can_request_keypad_interrupt() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::KEYCNT_OFFSET, Key::Start.mask() | (1 << 14));
+
+        io.set_key(Key::Start, true);
+
+        assert_ne!(
+            io.read16(IoRegisters::IF_OFFSET) & InterruptSource::Keypad.mask(),
+            0,
+        );
+    }
+
+    #[test]
+    fn keyinput_is_read_only() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::KEYINPUT_OFFSET, 0);
+
+        assert_eq!(io.read16(IoRegisters::KEYINPUT_OFFSET,), 0x03FF,);
+    }
+
+    #[test]
+    fn byte_write_to_haltcnt_requests_halt() {
+        let mut io = IoRegisters::new();
+
+        io.write8(IoRegisters::HALTCNT_OFFSET, 0);
+
+        assert_eq!(io.take_power_request(), Some(PowerStateRequest::Halt),);
+    }
+
+    #[test]
+    fn haltcnt_bit_seven_requests_stop() {
+        let mut io = IoRegisters::new();
+
+        io.write8(IoRegisters::HALTCNT_OFFSET, 0x80);
+
+        assert_eq!(io.take_power_request(), Some(PowerStateRequest::Stop),);
+    }
+
+    #[test]
+    fn postflg_is_separate_from_haltcnt() {
+        let mut io = IoRegisters::new();
+
+        io.write8(IoRegisters::POSTFLG_OFFSET, 1);
+
+        assert_eq!(io.read8(IoRegisters::POSTFLG_OFFSET,), 1,);
+
+        assert_eq!(io.take_power_request(), None,);
+    }
+
+    #[test]
+    fn postflg_and_haltcnt_do_not_use_raw_backing_storage() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::POSTFLG_OFFSET, 0xCAFE);
+
+        /*
+         * Low byte = 0xFE.
+         * POSTFLG only retains bit zero, so result is zero.
+         */
+        assert_eq!(io.read8(IoRegisters::POSTFLG_OFFSET,), 0,);
+
+        /*
+         * High byte = 0xCA, bit 7 is set,
+         * therefore this requests STOP.
+         */
+        assert_eq!(io.take_power_request(), Some(PowerStateRequest::Stop),);
+
+        /*
+         * HALTCNT is write-only, so the high read byte is zero.
+         */
+        assert_eq!(io.read16(IoRegisters::POSTFLG_OFFSET,), 0,);
     }
 }

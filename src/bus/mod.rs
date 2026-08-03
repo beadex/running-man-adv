@@ -4,7 +4,9 @@ use std::fmt;
 mod dma;
 mod interrupt;
 mod io;
+mod keypad;
 mod memory;
+mod power;
 mod ppu;
 mod timer;
 
@@ -16,6 +18,10 @@ pub use self::dma::{
 pub use self::interrupt::{InterruptController, InterruptSource};
 
 pub use self::io::IoRegisters;
+
+pub use self::keypad::{Key, KeyControl, Keypad, KeypadInterruptCondition, KeypadUpdateResult};
+
+pub use self::power::{PowerControl, PowerStateRequest};
 
 pub use self::ppu::{DispStat, Ppu, PpuTickResult};
 
@@ -158,6 +164,14 @@ impl Bus {
 
     pub const REG_VCOUNT: u32 = IoRegisters::BASE + IoRegisters::VCOUNT_OFFSET;
 
+    pub const REG_KEYINPUT: u32 = IoRegisters::BASE + IoRegisters::KEYINPUT_OFFSET;
+
+    pub const REG_KEYCNT: u32 = IoRegisters::BASE + IoRegisters::KEYCNT_OFFSET;
+
+    pub const REG_POSTFLG: u32 = IoRegisters::BASE + IoRegisters::POSTFLG_OFFSET;
+
+    pub const REG_HALTCNT: u32 = IoRegisters::BASE + IoRegisters::HALTCNT_OFFSET;
+
     pub fn new() -> Self {
         Self {
             bios: Box::new([0; BIOS_SIZE]),
@@ -250,6 +264,28 @@ impl Bus {
 
     pub const fn irq_line(&self) -> bool {
         self.io.irq_line()
+    }
+
+    pub fn set_key(&mut self, key: Key, pressed: bool) {
+        self.io.set_key(key, pressed);
+    }
+
+    pub fn set_pressed_keys(&mut self, pressed_mask: u16) {
+        self.io.set_pressed_keys(pressed_mask);
+    }
+
+    pub fn take_power_request(&mut self) -> Option<PowerStateRequest> {
+        self.io.take_power_request()
+    }
+
+    pub const fn halt_wake_requested(&self) -> bool {
+        /*
+         * HALT wake-up is based on an enabled pending interrupt source.
+         *
+         * Keep this distinct from irq_line(), which additionally requires
+         * IME.
+         */
+        self.interrupt_controller().enabled_pending() != 0
     }
 
     pub fn read8(&self, address: u32) -> u8 {
