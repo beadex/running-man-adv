@@ -1,4 +1,6 @@
 pub mod arm;
+pub mod thumb;
+
 mod cpsr;
 mod exception;
 mod exception_handler;
@@ -259,20 +261,58 @@ impl Cpu {
 
         let fetch = bus.read16_timed(instruction_address, fetch_kind);
 
-        #[cfg(feature = "cpu-trace")]
-        println!(
-            "THUMB PC=0x{instruction_address:08X} \
-         instruction=0x{:04X}",
-            fetch.value,
-        );
-
+        /*
+         * Temporary sequential PC model.
+         *
+         * Executor helpers receive instruction_address separately for
+         * architectural PC+4 operand and branch behavior.
+         */
         self.registers.set_pc(instruction_address.wrapping_add(2));
 
-        /*
-         * THUMB execution has not been integrated yet, so this step only
-         * reports instruction-fetch timing.
-         */
-        fetch.cycles
+        let instruction = match thumb::decode_thumb(fetch.value) {
+            Ok(instruction) => instruction,
+
+            Err(error) => {
+                #[cfg(feature = "cpu-trace")]
+                eprintln!(
+                    "THUMB decode error: \
+                     pc=0x{instruction_address:08X} \
+                     opcode=0x{:04X} \
+                     error={error:?}",
+                    fetch.value,
+                );
+
+                /*
+                 * Fetch already occurred. Keep moving for now instead
+                 * of halting the emulator on an unsupported opcode.
+                 */
+                return fetch.cycles;
+            }
+        };
+
+        let execution =
+            match thumb::execute_thumb(&mut self.registers, bus, &instruction, instruction_address)
+            {
+                Ok(result) => result,
+
+                Err(error) => {
+                    #[cfg(feature = "cpu-trace")]
+                    eprintln!(
+                        "THUMB execution error: \
+                     pc=0x{instruction_address:08X} \
+                     instruction={instruction:?} \
+                     error={error:?}",
+                    );
+
+                    thumb::ThumbExecutionResult::sequential(1)
+                }
+            };
+
+        if execution.branch {
+            self.break_fetch_sequence();
+        }
+
+        fetch.cycles.saturating_add(execution.cycles)
     }
 }
 
@@ -1195,5 +1235,145 @@ mod tests {
          * WS0 non-sequential word fetch costs at least 6 cycles.
          */
         assert!(target_cycles >= 6);
+    }
+
+    #[test]
+    fn cpu_executes_thumb_immediate_sequence() {
+        let mut cpu = Cpu::new();
+
+        let mut bus = Bus::new();
+
+        /*
+         * 0x03000000: MOV R0, #10
+         * 0x03000002: ADD R0, #20
+         * 0x03000004: CMP R0, #30
+         */
+        bus.write16(0x0300_0000, 0x200A);
+
+        bus.write16(0x0300_0002, 0x3014);
+
+        bus.write16(0x0300_0004, 0x281E);
+
+        cpu.registers_mut().cpsr_mut().set_thumb_state(true);
+
+        cpu.registers_mut().set_pc(0x0300_0000);
+
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(0), 30,);
+
+        assert!(cpu.registers().cpsr().zero(),);
+
+        assert_eq!(cpu.registers().pc(), 0x0300_0006,);
+    }
+
+    #[test]
+    fn cpu_executes_thumb_conditional_branch() {
+        let mut cpu = Cpu::new();
+
+        let mut bus = Bus::new();
+
+        /*
+         * 0x03000000: MOV R0, #1
+         * 0x03000002: CMP R0, #1
+         * 0x03000004: BEQ +2
+         * 0x03000006: MOV R1, #0
+         * 0x03000008: MOV R1, #1
+         *
+         * BEQ base = 0x03000008.
+         * offset=0 targets 0x03000008.
+         */
+        bus.write16(0x0300_0000, 0x2001);
+
+        bus.write16(0x0300_0002, 0x2801);
+
+        bus.write16(0x0300_0004, 0xD000);
+
+        bus.write16(0x0300_0006, 0x2100);
+
+        bus.write16(0x0300_0008, 0x2101);
+
+        cpu.registers_mut().cpsr_mut().set_thumb_state(true);
+
+        cpu.registers_mut().set_pc(0x0300_0000);
+
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(1), 1,);
+
+        assert_eq!(cpu.registers().pc(), 0x0300_000A,);
+    }
+
+    #[test]
+    fn thumb_bx_can_switch_to_arm() {
+        let mut cpu = Cpu::new();
+
+        let mut bus = Bus::new();
+
+        /*
+         * BX R0
+         */
+        bus.write16(0x0300_0000, 0x4700);
+
+        /*
+         * ARM MOV R1, #42
+         */
+        bus.write32(0x0200_0000, 0xE3A0_102A);
+
+        cpu.registers_mut().write(0, 0x0200_0000);
+
+        cpu.registers_mut().cpsr_mut().set_thumb_state(true);
+
+        cpu.registers_mut().set_pc(0x0300_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.state(), CpuState::Arm,);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_0000,);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(1), 42,);
+    }
+
+    #[test]
+    fn thumb_branch_breaks_fetch_sequence() {
+        let mut cpu = Cpu::new();
+
+        let mut bus = Bus::new();
+
+        let mut rom = vec![0u8; 8];
+
+        /*
+         * 0x08000000: B +0
+         *
+         * base=0x08000004, target=0x08000004.
+         */
+        rom[0..2].copy_from_slice(&0xE000u16.to_le_bytes());
+
+        /*
+         * 0x08000004: MOV R0, #1
+         */
+        rom[4..6].copy_from_slice(&0x2001u16.to_le_bytes());
+
+        bus.load_rom(&rom).unwrap();
+
+        cpu.registers_mut().cpsr_mut().set_thumb_state(true);
+
+        cpu.registers_mut().set_pc(0x0800_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().pc(), 0x0800_0004,);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(0), 1,);
     }
 }
