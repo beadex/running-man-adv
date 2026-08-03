@@ -1,7 +1,7 @@
 use crate::{
     bus::{
         Bus, BusLoadError, InterruptController, InterruptSource, IoRegisters, Key,
-        PowerStateRequest,
+        PowerStateRequest, SCREEN_HEIGHT, SCREEN_WIDTH,
     },
     cpu::{Cpu, CpuState, Registers},
 };
@@ -66,6 +66,26 @@ impl Gba {
 
         self.elapsed_cycles = 0;
         self.stopped = false;
+    }
+
+    pub const SCREEN_WIDTH: usize = crate::bus::SCREEN_WIDTH;
+
+    pub const SCREEN_HEIGHT: usize = crate::bus::SCREEN_HEIGHT;
+
+    pub fn framebuffer(&self) -> &[u32] {
+        self.bus.framebuffer()
+    }
+
+    pub const fn frame_ready(&self) -> bool {
+        self.bus.frame_ready()
+    }
+
+    pub fn take_frame_ready(&mut self) -> bool {
+        self.bus.take_frame_ready()
+    }
+
+    pub const fn frame_number(&self) -> u64 {
+        self.bus.frame_number()
     }
 
     /// Advances the machine by one CPU scheduling unit.
@@ -138,6 +158,26 @@ impl Gba {
              * path returns zero without setting `stopped`.
              */
             if cycles == 0 {
+                break;
+            }
+        }
+
+        self.elapsed_cycles.wrapping_sub(starting_cycles)
+    }
+
+    pub fn run_until_frame(&mut self) -> u64 {
+        let starting_cycles = self.elapsed_cycles;
+
+        /*
+         * Discard an old unconsumed frame marker so this method waits for
+         * the next frame.
+         */
+        self.take_frame_ready();
+
+        while !self.stopped {
+            self.step();
+
+            if self.take_frame_ready() {
                 break;
             }
         }
@@ -538,5 +578,18 @@ mod tests {
             gba.bus().read16(Bus::REG_IF) & InterruptSource::Keypad.mask(),
             0,
         );
+    }
+
+    #[test]
+    fn gba_exposes_mode3_framebuffer() {
+        let mut gba = Gba::new();
+
+        gba.bus_mut().write16(Bus::REG_DISPCNT, 3);
+
+        gba.bus_mut().write16(0x0600_0000, 0x7C00);
+
+        gba.bus_mut().tick(crate::bus::Ppu::HDRAW_CYCLES as u32);
+
+        assert_eq!(gba.framebuffer()[0], 0xFF00_00FF,);
     }
 }

@@ -9,6 +9,7 @@ mod memory;
 mod power;
 mod ppu;
 mod timer;
+mod video;
 mod waitstate;
 
 pub use self::dma::{
@@ -24,9 +25,14 @@ pub use self::keypad::{Key, KeyControl, Keypad, KeypadInterruptCondition, Keypad
 
 pub use self::power::{PowerControl, PowerStateRequest};
 
-pub use self::ppu::{DispStat, Ppu, PpuTickResult};
+pub use self::ppu::{DispStat, Ppu, PpuTickResult, VisibleScanlineIter, VisibleScanlineSet};
 
 pub use self::timer::{TIMER_COUNT, Timer, TimerControl, TimerController, TimerIndex};
+
+pub use self::video::{
+    DisplayControl, FRAMEBUFFER_PIXEL_COUNT, Framebuffer, SCREEN_HEIGHT, SCREEN_WIDTH, Video,
+    VideoMode, bgr555_to_rgba8888,
+};
 
 pub use self::waitstate::{AccessKind, AccessWidth, MemoryRegion, TimedAccess, WaitControl};
 
@@ -177,6 +183,8 @@ impl Bus {
 
     pub const REG_WAITCNT: u32 = IoRegisters::BASE + IoRegisters::WAITCNT_OFFSET;
 
+    pub const REG_DISPCNT: u32 = IoRegisters::BASE + IoRegisters::DISPCNT_OFFSET;
+
     pub fn new() -> Self {
         Self {
             bios: Box::new([0; BIOS_SIZE]),
@@ -299,6 +307,22 @@ impl Bus {
 
     pub fn access_cycles(&self, address: u32, width: AccessWidth, kind: AccessKind) -> u32 {
         self.io.wait_control().access_cycles(address, width, kind)
+    }
+
+    pub fn framebuffer(&self) -> &[u32] {
+        self.io.video().framebuffer()
+    }
+
+    pub const fn frame_ready(&self) -> bool {
+        self.io.video().frame_ready()
+    }
+
+    pub fn take_frame_ready(&mut self) -> bool {
+        self.io.video_mut().take_frame_ready()
+    }
+
+    pub const fn frame_number(&self) -> u64 {
+        self.io.video().frame_number()
     }
 
     pub fn read8(&self, address: u32) -> u8 {
@@ -548,7 +572,32 @@ impl Bus {
     }
 
     pub fn tick(&mut self, cycles: u32) {
-        self.io.tick(cycles);
+        let result = self.io.tick(cycles);
+
+        /*
+         * Render after PPU timing has reported which visible lines have
+         * completed.
+         *
+         * The immutable VRAM borrow and mutable video borrow target
+         * separate Bus fields, so Rust permits this split borrow.
+         */
+        {
+            let vram = self.vram.as_slice();
+
+            let video = self.io.video_mut();
+
+            for line in result.completed_visible_lines.iter() {
+                video.render_scanline(line, vram);
+            }
+
+            /*
+             * VBlank begins only after all 160 visible lines have entered
+             * HBlank and therefore been rendered.
+             */
+            if result.vblank_starts != 0 {
+                video.mark_frame_ready();
+            }
+        }
     }
 
     pub fn run_pending_dma(&mut self) -> Option<DmaRunResult> {
@@ -694,6 +743,7 @@ fn advance_dma_address(address: u32, width: u32, control: DmaAddressControl) -> 
 mod tests {
     use super::{
         AccessKind, Bus, BusLoadError, DmaChannelIndex, InterruptController, InterruptSource, Ppu,
+        SCREEN_WIDTH,
     };
 
     #[test]
@@ -1134,5 +1184,101 @@ mod tests {
         assert_eq!(result.cycles, 4);
 
         assert_eq!(bus.read16(0x0300_0100), 0xCAFE,);
+    }
+
+    #[test]
+    fn mode3_pixel_is_rendered_when_hblank_begins() {
+        let mut bus = Bus::new();
+
+        bus.write16(Bus::REG_DISPCNT, 3);
+
+        /*
+         * Pixel 0,0 = red.
+         */
+        bus.write16(0x0600_0000, 0x001F);
+
+        /*
+         * Pixel is not rendered before the line completes.
+         */
+        assert_ne!(bus.framebuffer()[0], 0xFFFF_0000,);
+
+        bus.tick(Ppu::HDRAW_CYCLES as u32);
+
+        assert_eq!(bus.framebuffer()[0], 0xFFFF_0000,);
+    }
+
+    #[test]
+    fn mode3_renders_pixel_at_correct_coordinates() {
+        let mut bus = Bus::new();
+
+        bus.write16(Bus::REG_DISPCNT, 3);
+
+        let x = 25usize;
+        let y = 10usize;
+
+        let vram_address = 0x0600_0000 + ((y * SCREEN_WIDTH + x) * 2) as u32;
+
+        bus.write16(vram_address, 0x03E0);
+
+        bus.tick(Ppu::CYCLES_PER_LINE as u32 * y as u32 + Ppu::HDRAW_CYCLES as u32);
+
+        assert_eq!(bus.framebuffer()[y * SCREEN_WIDTH + x], 0xFF00_FF00,);
+    }
+
+    #[test]
+    fn mode3_frame_becomes_ready_at_vblank() {
+        let mut bus = Bus::new();
+
+        bus.write16(Bus::REG_DISPCNT, 3);
+
+        assert!(!bus.frame_ready());
+
+        bus.tick(Ppu::CYCLES_PER_LINE as u32 * Ppu::VISIBLE_LINES as u32);
+
+        assert!(bus.frame_ready());
+        assert_eq!(bus.frame_number(), 1);
+
+        assert!(bus.take_frame_ready());
+        assert!(!bus.frame_ready());
+        assert!(!bus.take_frame_ready());
+    }
+
+    #[test]
+    fn forced_blank_renders_white() {
+        let mut bus = Bus::new();
+
+        bus.write16(Bus::REG_DISPCNT, 3 | (1 << 7));
+
+        bus.write16(0x0600_0000, 0x001F);
+
+        bus.tick(Ppu::HDRAW_CYCLES as u32);
+
+        assert_eq!(bus.framebuffer()[0], 0xFFFF_FFFF,);
+    }
+
+    #[test]
+    fn dma_to_vram_is_visible_in_mode3_framebuffer() {
+        let mut bus = Bus::new();
+
+        bus.write16(Bus::REG_DISPCNT, 3);
+
+        /*
+         * Source contains one red BGR555 pixel.
+         */
+        bus.write16(0x0200_0100, 0x001F);
+
+        bus.write32(Bus::REG_DMA0SAD, 0x0200_0100);
+
+        bus.write32(Bus::REG_DMA0DAD, 0x0600_0000);
+
+        bus.write16(Bus::REG_DMA0CNT_L, 1);
+
+        bus.write16(Bus::REG_DMA0CNT_H, 1 << 15);
+
+        bus.run_pending_dma().unwrap();
+
+        bus.tick(Ppu::HDRAW_CYCLES as u32);
+
+        assert_eq!(bus.framebuffer()[0], 0xFFFF_0000,);
     }
 }

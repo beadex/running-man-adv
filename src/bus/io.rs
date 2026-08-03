@@ -1,7 +1,7 @@
 use super::{
     DmaChannelIndex, DmaController, DmaStartTiming, InterruptController, InterruptSource, Key,
-    Keypad, KeypadUpdateResult, PowerControl, PowerStateRequest, Ppu, TimerController, TimerIndex,
-    WaitControl,
+    Keypad, KeypadUpdateResult, PowerControl, PowerStateRequest, Ppu, PpuTickResult,
+    TimerController, TimerIndex, Video, WaitControl,
 };
 
 #[derive(Debug, Clone)]
@@ -11,6 +11,7 @@ pub struct IoRegisters {
     timers: TimerController,
     dma: DmaController,
     ppu: Ppu,
+    video: Video,
     keypad: Keypad,
     power: PowerControl,
     wait_control: WaitControl,
@@ -56,6 +57,7 @@ impl IoRegisters {
     pub const IF_OFFSET: u32 = 0x0202;
     pub const IME_OFFSET: u32 = 0x0208;
 
+    pub const DISPCNT_OFFSET: u32 = 0x0000;
     pub const DISPSTAT_OFFSET: u32 = 0x0004;
     pub const VCOUNT_OFFSET: u32 = 0x0006;
 
@@ -74,6 +76,7 @@ impl IoRegisters {
             timers: TimerController::new(),
             dma: DmaController::new(),
             ppu: Ppu::new(),
+            video: Video::new(),
             keypad: Keypad::new(),
             power: PowerControl::new(),
             wait_control: WaitControl::new(),
@@ -119,6 +122,15 @@ impl IoRegisters {
     pub fn ppu_mut(&mut self) -> &mut Ppu {
         &mut self.ppu
     }
+
+    pub const fn video(&self) -> &Video {
+        &self.video
+    }
+
+    pub fn video_mut(&mut self) -> &mut Video {
+        &mut self.video
+    }
+
     pub const fn keypad(&self) -> &Keypad {
         &self.keypad
     }
@@ -165,10 +177,7 @@ impl IoRegisters {
         &mut self.wait_control
     }
 
-    pub fn tick(&mut self, cycles: u32) {
-        /*
-         * Advance the PPU first so timing events can queue DMA requests.
-         */
+    pub fn tick(&mut self, cycles: u32) -> PpuTickResult {
         let ppu_result = self.ppu.tick(cycles);
 
         if ppu_result.hblank_starts != 0 {
@@ -181,22 +190,17 @@ impl IoRegisters {
                 .trigger(DmaStartTiming::VBlank, ppu_result.vblank_starts);
         }
 
-        /*
-         * Merge PPU interrupt requests into IF.
-         */
         if ppu_result.interrupt_requests != 0 {
             self.interrupts.request_mask(ppu_result.interrupt_requests);
         }
 
-        /*
-         * Advance timers independently using the same elapsed machine
-         * cycles.
-         */
         let timer_interrupts = self.timers.tick(cycles);
 
         if timer_interrupts != 0 {
             self.interrupts.request_mask(timer_interrupts);
         }
+
+        ppu_result
     }
 
     pub const fn irq_line(&self) -> bool {
@@ -214,6 +218,7 @@ impl IoRegisters {
         self.timers.reset();
         self.dma.reset();
         self.ppu.reset();
+        self.video.reset();
         self.keypad.reset();
         self.power.reset();
         self.wait_control.reset();
@@ -235,7 +240,8 @@ impl IoRegisters {
 
         if matches!(
             aligned,
-            Self::DISPSTAT_OFFSET
+            Self::DISPCNT_OFFSET
+                | Self::DISPSTAT_OFFSET
                 | Self::VCOUNT_OFFSET
                 | Self::KEYINPUT_OFFSET
                 | Self::KEYCNT_OFFSET
@@ -273,6 +279,16 @@ impl IoRegisters {
 
         let aligned = offset & !1;
         let high_byte = offset & 1 != 0;
+
+        if aligned == Self::DISPCNT_OFFSET {
+            if high_byte {
+                self.video.write_display_control_high(value);
+            } else {
+                self.video.write_display_control_low(value);
+            }
+
+            return;
+        }
 
         if aligned == Self::DISPSTAT_OFFSET {
             let current = self.ppu.read_dispstat();
@@ -404,6 +420,10 @@ impl IoRegisters {
         let offset = offset & !1;
 
         match offset {
+            Self::DISPCNT_OFFSET => {
+                return self.video.read_display_control();
+            }
+
             Self::DISPSTAT_OFFSET => {
                 return self.ppu.read_dispstat();
             }
@@ -485,6 +505,12 @@ impl IoRegisters {
         let offset = offset & !1;
 
         match offset {
+            Self::DISPCNT_OFFSET => {
+                self.video.write_display_control(value);
+
+                return;
+            }
+
             Self::DISPSTAT_OFFSET => {
                 self.ppu.write_dispstat(value);
                 return;
@@ -738,7 +764,7 @@ mod tests {
 
     use crate::bus::{
         DmaChannelIndex, DmaTransferWidth, InterruptController, InterruptSource, Key,
-        PowerStateRequest, Ppu, TimerIndex, WaitControl,
+        PowerStateRequest, Ppu, TimerIndex, VideoMode, WaitControl,
     };
 
     #[test]
@@ -1223,5 +1249,38 @@ mod tests {
             io.read16(IoRegisters::WAITCNT_OFFSET,),
             WaitControl::RESET_VALUE,
         );
+    }
+
+    #[test]
+    fn dispcnt_is_mapped() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::DISPCNT_OFFSET, 3 | (1 << 10));
+
+        assert_eq!(io.read16(IoRegisters::DISPCNT_OFFSET,), 3 | (1 << 10),);
+
+        assert_eq!(io.video().display_control().mode(), VideoMode::Mode3,);
+
+        assert!(io.video().display_control().bg2_enabled(),);
+    }
+
+    #[test]
+    fn dispcnt_byte_access_is_little_endian() {
+        let mut io = IoRegisters::new();
+
+        io.write8(IoRegisters::DISPCNT_OFFSET, 0x83);
+
+        io.write8(IoRegisters::DISPCNT_OFFSET + 1, 0x04);
+
+        assert_eq!(io.read16(IoRegisters::DISPCNT_OFFSET,), 0x0483,);
+    }
+
+    #[test]
+    fn io_tick_returns_completed_scanlines() {
+        let mut io = IoRegisters::new();
+
+        let result = io.tick(Ppu::HDRAW_CYCLES as u32);
+
+        assert!(result.completed_visible_lines.contains(0),);
     }
 }

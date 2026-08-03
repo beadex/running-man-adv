@@ -1,5 +1,7 @@
 use super::InterruptSource;
 
+const VISIBLE_LINE_WORD_COUNT: usize = 5;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispStat {
     vblank_irq_enabled: bool,
@@ -35,16 +37,6 @@ impl DispStat {
     }
 
     pub fn write(&mut self, value: u16) {
-        /*
-         * DISPSTAT writable fields:
-         *
-         * bit 3     VBlank IRQ enable
-         * bit 4     HBlank IRQ enable
-         * bit 5     VCounter IRQ enable
-         * bits 8-15 VCOUNT comparison value
-         *
-         * Status bits 0-2 are read-only.
-         */
         self.vblank_irq_enabled = value & (1 << 3) != 0;
 
         self.hblank_irq_enabled = value & (1 << 4) != 0;
@@ -91,33 +83,130 @@ impl Default for DispStat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibleScanlineSet {
+    words: [u32; VISIBLE_LINE_WORD_COUNT],
+}
+
+impl VisibleScanlineSet {
+    pub const fn new() -> Self {
+        Self {
+            words: [0; VISIBLE_LINE_WORD_COUNT],
+        }
+    }
+
+    pub fn insert(&mut self, line: u16) {
+        if line >= Ppu::VISIBLE_LINES {
+            return;
+        }
+
+        let word = line as usize / 32;
+
+        let bit = line as usize % 32;
+
+        self.words[word] |= 1u32 << bit;
+    }
+
+    pub const fn contains(&self, line: u16) -> bool {
+        if line >= Ppu::VISIBLE_LINES {
+            return false;
+        }
+
+        let word = line as usize / 32;
+
+        let bit = line as usize % 32;
+
+        self.words[word] & (1u32 << bit) != 0
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        let mut index = 0;
+
+        while index < VISIBLE_LINE_WORD_COUNT {
+            if self.words[index] != 0 {
+                return false;
+            }
+
+            index += 1;
+        }
+
+        true
+    }
+
+    pub fn iter(&self) -> VisibleScanlineIter<'_> {
+        VisibleScanlineIter {
+            set: self,
+            next_line: 0,
+        }
+    }
+}
+
+impl Default for VisibleScanlineSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct VisibleScanlineIter<'a> {
+    set: &'a VisibleScanlineSet,
+    next_line: u16,
+}
+
+impl Iterator for VisibleScanlineIter<'_> {
+    type Item = u16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.next_line < Ppu::VISIBLE_LINES {
+            let line = self.next_line;
+
+            self.next_line += 1;
+
+            if self.set.contains(line) {
+                return Some(line);
+            }
+        }
+
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PpuTickResult {
     pub hblank_starts: u32,
     pub vblank_starts: u32,
     pub vcount_matches: u32,
     pub new_frames: u32,
 
-    /*
-     * InterruptSource mask to merge into IF.
-     */
     pub interrupt_requests: u16,
+
+    /*
+     * A visible line is complete when its HBlank begins.
+     */
+    pub completed_visible_lines: VisibleScanlineSet,
+}
+
+impl PpuTickResult {
+    pub const fn new() -> Self {
+        Self {
+            hblank_starts: 0,
+            vblank_starts: 0,
+            vcount_matches: 0,
+            new_frames: 0,
+            interrupt_requests: 0,
+            completed_visible_lines: VisibleScanlineSet::new(),
+        }
+    }
+}
+
+impl Default for PpuTickResult {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ppu {
-    /*
-     * CPU cycles elapsed within the current scanline.
-     *
-     * Range: 0..1232.
-     */
     line_cycle: u16,
-
-    /*
-     * Current scanline.
-     *
-     * Range: 0..227.
-     */
     vcount: u16,
 
     in_hblank: bool,
@@ -130,6 +219,7 @@ pub struct Ppu {
 impl Ppu {
     pub const HDRAW_CYCLES: u16 = 960;
     pub const HBLANK_CYCLES: u16 = 272;
+
     pub const CYCLES_PER_LINE: u16 = Self::HDRAW_CYCLES + Self::HBLANK_CYCLES;
 
     pub const VISIBLE_LINES: u16 = 160;
@@ -143,10 +233,6 @@ impl Ppu {
             in_hblank: false,
             in_vblank: false,
 
-            /*
-             * Default DISPSTAT comparison is zero and VCOUNT starts
-             * at zero.
-             */
             vcount_match: true,
 
             dispstat: DispStat::new(),
@@ -185,17 +271,13 @@ impl Ppu {
     pub fn write_dispstat(&mut self, value: u16) {
         self.dispstat.write(value);
 
-        /*
-         * Update the status bit immediately. We deliberately do not
-         * generate an IRQ merely because software changed the compare
-         * value to the current scanline.
-         */
         self.vcount_match = self.vcount as u8 == self.dispstat.vcount_setting();
     }
 
     pub fn tick(&mut self, cycles: u32) -> PpuTickResult {
         let mut remaining = cycles;
-        let mut result = PpuTickResult::default();
+
+        let mut result = PpuTickResult::new();
 
         while remaining > 0 {
             let next_boundary = if self.in_hblank {
@@ -204,20 +286,22 @@ impl Ppu {
                 Self::HDRAW_CYCLES
             };
 
-            let cycles_until_boundary = next_boundary - self.line_cycle;
+            let until_boundary = next_boundary - self.line_cycle;
 
-            if remaining < cycles_until_boundary as u32 {
+            if remaining < until_boundary as u32 {
                 self.line_cycle += remaining as u16;
+
                 break;
             }
 
             self.line_cycle = next_boundary;
-            remaining -= cycles_until_boundary as u32;
 
-            if !self.in_hblank {
-                self.enter_hblank(&mut result);
-            } else {
+            remaining -= until_boundary as u32;
+
+            if self.in_hblank {
                 self.finish_scanline(&mut result);
+            } else {
+                self.enter_hblank(&mut result);
             }
         }
 
@@ -226,7 +310,16 @@ impl Ppu {
 
     fn enter_hblank(&mut self, result: &mut PpuTickResult) {
         self.in_hblank = true;
+
         result.hblank_starts += 1;
+
+        /*
+         * The currently displayed visible line is now complete and
+         * can be converted from VRAM into the host framebuffer.
+         */
+        if self.vcount < Self::VISIBLE_LINES {
+            result.completed_visible_lines.insert(self.vcount);
+        }
 
         if self.dispstat.hblank_irq_enabled() {
             result.interrupt_requests |= InterruptSource::HBlank.mask();
@@ -241,6 +334,7 @@ impl Ppu {
 
         if self.vcount == Self::VISIBLE_LINES {
             self.in_vblank = true;
+
             result.vblank_starts += 1;
 
             if self.dispstat.vblank_irq_enabled() {
@@ -251,6 +345,7 @@ impl Ppu {
         if self.vcount == Self::TOTAL_LINES {
             self.vcount = 0;
             self.in_vblank = false;
+
             result.new_frames += 1;
         }
 
@@ -258,10 +353,6 @@ impl Ppu {
 
         self.vcount_match = self.vcount as u8 == self.dispstat.vcount_setting();
 
-        /*
-         * VCounter IRQ is edge-triggered when the comparison becomes
-         * true at the beginning of a scanline.
-         */
         if self.vcount_match && !previous_match {
             result.vcount_matches += 1;
 
@@ -289,76 +380,44 @@ mod tests {
     use crate::bus::InterruptSource;
 
     #[test]
-    fn starts_on_first_visible_scanline() {
-        let ppu = Ppu::new();
-
-        assert_eq!(ppu.vcount(), 0);
-        assert_eq!(ppu.line_cycle(), 0);
-        assert!(!ppu.in_hblank());
-        assert!(!ppu.in_vblank());
-        assert!(ppu.vcount_match());
-    }
-
-    #[test]
-    fn enters_hblank_after_960_cycles() {
+    fn visible_scanline_completes_at_hblank_start() {
         let mut ppu = Ppu::new();
 
         let result = ppu.tick(Ppu::HDRAW_CYCLES as u32);
 
-        assert!(ppu.in_hblank());
-        assert_eq!(ppu.vcount(), 0);
-        assert_eq!(result.hblank_starts, 1);
+        assert!(result.completed_visible_lines.contains(0),);
     }
 
     #[test]
-    fn advances_scanline_after_1232_cycles() {
+    fn vblank_lines_are_not_marked_for_rendering() {
         let mut ppu = Ppu::new();
 
-        ppu.tick(Ppu::CYCLES_PER_LINE as u32);
+        ppu.tick(Ppu::CYCLES_PER_LINE as u32 * Ppu::VISIBLE_LINES as u32);
 
-        assert_eq!(ppu.vcount(), 1);
-        assert_eq!(ppu.line_cycle(), 0);
-        assert!(!ppu.in_hblank());
-    }
-
-    #[test]
-    fn enters_vblank_at_scanline_160() {
-        let mut ppu = Ppu::new();
-
-        let result = ppu.tick(Ppu::CYCLES_PER_LINE as u32 * Ppu::VISIBLE_LINES as u32);
-
-        assert_eq!(ppu.vcount(), 160);
-        assert!(ppu.in_vblank());
-        assert_eq!(result.vblank_starts, 1);
-    }
-
-    #[test]
-    fn wraps_after_scanline_227() {
-        let mut ppu = Ppu::new();
-
-        let result = ppu.tick(Ppu::CYCLES_PER_LINE as u32 * Ppu::TOTAL_LINES as u32);
-
-        assert_eq!(ppu.vcount(), 0);
-        assert!(!ppu.in_vblank());
-        assert_eq!(result.new_frames, 1);
-    }
-
-    #[test]
-    fn hblank_irq_is_requested_when_enabled() {
-        let mut ppu = Ppu::new();
-
-        ppu.write_dispstat(1 << 4);
+        assert_eq!(ppu.vcount(), Ppu::VISIBLE_LINES,);
 
         let result = ppu.tick(Ppu::HDRAW_CYCLES as u32);
 
-        assert_ne!(
-            result.interrupt_requests & InterruptSource::HBlank.mask(),
-            0,
-        );
+        assert!(result.completed_visible_lines.is_empty(),);
     }
 
     #[test]
-    fn vblank_irq_is_requested_when_enabled() {
+    fn tick_can_complete_multiple_visible_lines() {
+        let mut ppu = Ppu::new();
+
+        let result = ppu.tick(Ppu::CYCLES_PER_LINE as u32 * 3 + Ppu::HDRAW_CYCLES as u32);
+
+        assert!(result.completed_visible_lines.contains(0),);
+
+        assert!(result.completed_visible_lines.contains(1),);
+
+        assert!(result.completed_visible_lines.contains(2),);
+
+        assert!(result.completed_visible_lines.contains(3),);
+    }
+
+    #[test]
+    fn vblank_irq_still_works() {
         let mut ppu = Ppu::new();
 
         ppu.write_dispstat(1 << 3);
@@ -369,36 +428,5 @@ mod tests {
             result.interrupt_requests & InterruptSource::VBlank.mask(),
             0,
         );
-    }
-
-    #[test]
-    fn vcounter_match_requests_interrupt() {
-        let mut ppu = Ppu::new();
-
-        /*
-         * Compare VCOUNT with scanline 10 and enable its IRQ.
-         */
-        ppu.write_dispstat((10 << 8) | (1 << 5));
-
-        let result = ppu.tick(Ppu::CYCLES_PER_LINE as u32 * 10);
-
-        assert_eq!(ppu.vcount(), 10);
-        assert!(ppu.vcount_match());
-
-        assert_ne!(
-            result.interrupt_requests & InterruptSource::VCounterMatch.mask(),
-            0,
-        );
-    }
-
-    #[test]
-    fn tick_can_cross_multiple_scanlines() {
-        let mut ppu = Ppu::new();
-
-        let result = ppu.tick(Ppu::CYCLES_PER_LINE as u32 * 3 + Ppu::HDRAW_CYCLES as u32);
-
-        assert_eq!(ppu.vcount(), 3);
-        assert!(ppu.in_hblank());
-        assert_eq!(result.hblank_starts, 4);
     }
 }

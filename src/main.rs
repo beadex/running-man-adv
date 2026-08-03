@@ -45,15 +45,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut gba = Gba::with_images(bios.bytes(), rom.bytes())?;
 
-    gba.registers_mut().set_pc(0);
+    loop {
+        gba.step();
 
-    let consumed_cycles = gba.run_steps(1_000);
+        if gba.take_frame_ready() {
+            let framebuffer = gba.framebuffer();
 
-    println!("Stopped after {consumed_cycles} cycles");
-
-    println!("PC = 0x{:08X}", gba.registers().pc(),);
-
-    Ok(())
+            println!(
+                "frame={} pixel(0,0)=0x{:08X}",
+                gba.frame_number(),
+                framebuffer[0],
+            );
+        }
+    }
 }
 
 #[derive(Debug)]
