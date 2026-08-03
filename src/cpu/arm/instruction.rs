@@ -1,6 +1,6 @@
 use super::{
     ArmCondition, BranchExchangeInstruction, BranchInstruction, DataProcessingInstruction,
-    MultiplyInstruction,
+    MultiplyInstruction, SingleDataTransferInstruction,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,6 +10,8 @@ pub enum ArmInstruction {
     BranchExchange(BranchExchangeInstruction),
 
     Multiply(MultiplyInstruction),
+
+    SingleDataTransfer(SingleDataTransferInstruction),
 
     MultiplyLong {
         condition: ArmCondition,
@@ -22,11 +24,6 @@ pub enum ArmInstruction {
     },
 
     HalfwordDataTransfer {
-        condition: ArmCondition,
-        raw: u32,
-    },
-
-    SingleDataTransfer {
         condition: ArmCondition,
         raw: u32,
     },
@@ -75,10 +72,11 @@ impl ArmInstruction {
 
             Self::Multiply(instruction) => instruction.condition,
 
+            Self::SingleDataTransfer(instruction) => instruction.condition,
+
             Self::MultiplyLong { condition, .. }
             | Self::SingleDataSwap { condition, .. }
             | Self::HalfwordDataTransfer { condition, .. }
-            | Self::SingleDataTransfer { condition, .. }
             | Self::BlockDataTransfer { condition, .. }
             | Self::CoprocessorDataTransfer { condition, .. }
             | Self::CoprocessorDataOperation { condition, .. }

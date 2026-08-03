@@ -1,8 +1,9 @@
-use crate::cpu::Registers;
+use crate::{bus::Bus, cpu::Registers};
 
 use super::{
-    ArmInstruction, BranchExchangeExecutionError, DataProcessingExecutionError, execute_branch,
-    execute_branch_exchange, execute_data_processing, execute_multiply,
+    ArmInstruction, BranchExchangeExecutionError, DataProcessingExecutionError,
+    SingleDataTransferExecutionError, execute_branch, execute_branch_exchange,
+    execute_data_processing, execute_multiply, execute_single_data_transfer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,11 +12,14 @@ pub enum ArmExecutionError {
 
     BranchExchange(BranchExchangeExecutionError),
 
+    SingleDataTransfer(SingleDataTransferExecutionError),
+
     UnimplementedInstruction,
 }
 
 pub fn execute_arm(
     registers: &mut Registers,
+    bus: &mut Bus,
     instruction: &ArmInstruction,
     instruction_address: u32,
 ) -> Result<(), ArmExecutionError> {
@@ -41,6 +45,12 @@ pub fn execute_arm(
             execute_multiply(registers, *instruction);
 
             Ok(())
+        }
+
+        ArmInstruction::SingleDataTransfer(instruction) => {
+            execute_single_data_transfer(registers, bus, *instruction, instruction_address)
+                .map(|_| ())
+                .map_err(ArmExecutionError::SingleDataTransfer)
         }
 
         _ => Err(ArmExecutionError::UnimplementedInstruction),

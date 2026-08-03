@@ -107,7 +107,7 @@ impl Cpu {
             }
         };
 
-        match arm::execute_arm(&mut self.registers, &instruction, instruction_address) {
+        match arm::execute_arm(&mut self.registers, bus, &instruction, instruction_address) {
             Ok(()) => {}
 
             Err(arm::ArmExecutionError::UnimplementedInstruction) => {
@@ -430,5 +430,79 @@ mod tests {
         cpu.step(&mut bus);
 
         assert_eq!(cpu.registers().read(0), 99);
+    }
+
+    #[test]
+    fn cpu_executes_arm_str_then_ldr() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * 0x02000000: STR R0, [R1]
+         * 0x02000004: LDR R2, [R1]
+         */
+        bus.write32(0x0200_0000, 0xE581_0000);
+
+        bus.write32(0x0200_0004, 0xE591_2000);
+
+        cpu.registers_mut().write(0, 0x1234_5678);
+
+        cpu.registers_mut().write(1, 0x0200_0100);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+
+        assert_eq!(bus.read32(0x0200_0100), 0x1234_5678);
+
+        assert_eq!(cpu.registers().read(2), 0x1234_5678);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_0008);
+    }
+
+    #[test]
+    fn cpu_executes_pc_relative_ldr() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * At 0x02000000:
+         *
+         * LDR R0, [PC, #0]
+         *
+         * PC base = instruction address + 8
+         *         = 0x02000008
+         */
+        bus.write32(0x0200_0000, 0xE59F_0000);
+
+        bus.write32(0x0200_0008, 0xCAFE_BABE);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(0), 0xCAFE_BABE);
+    }
+
+    #[test]
+    fn cpu_executes_post_indexed_ldr() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        // LDR R0, [R1], #4
+        bus.write32(0x0200_0000, 0xE491_0004);
+
+        bus.write32(0x0200_0100, 0x1122_3344);
+
+        cpu.registers_mut().write(1, 0x0200_0100);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(0), 0x1122_3344);
+
+        assert_eq!(cpu.registers().read(1), 0x0200_0104);
     }
 }

@@ -12,6 +12,8 @@ mod instruction;
 mod instruction_decoder;
 mod multiply;
 mod multiply_executor;
+mod single_data_transfer;
+mod single_data_transfer_executor;
 
 pub use self::alu::{AddResult, AluFlags, add_with_carry, arithmetic_shift_flags, logical_flags};
 
@@ -50,4 +52,14 @@ pub use self::multiply::{MultiplyDecodeError, MultiplyInstruction, decode_multip
 
 pub use self::multiply_executor::{
     MultiplyExecutionResult, execute_multiply, multiply_iteration_count,
+};
+
+pub use self::single_data_transfer::{
+    SingleDataTransferDecodeError, SingleDataTransferInstruction, TransferOffset,
+    decode_single_data_transfer,
+};
+
+pub use self::single_data_transfer_executor::{
+    SingleDataTransferExecutionError, SingleDataTransferExecutionResult,
+    execute_single_data_transfer,
 };
