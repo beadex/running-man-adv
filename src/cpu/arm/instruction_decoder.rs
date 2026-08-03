@@ -1,7 +1,7 @@
 use super::{
     ArmInstruction, ArmInstructionKind, BranchDecodeError, BranchExchangeDecodeError,
-    DataProcessingDecodeError, classify, condition, decode_branch, decode_branch_exchange,
-    decode_data_processing,
+    DataProcessingDecodeError, MultiplyDecodeError, classify, condition, decode_branch,
+    decode_branch_exchange, decode_data_processing, decode_multiply,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,6 +9,7 @@ pub enum ArmDecodeError {
     DataProcessing(DataProcessingDecodeError),
     Branch(BranchDecodeError),
     BranchExchange(BranchExchangeDecodeError),
+    Multiply(MultiplyDecodeError),
 }
 
 pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
@@ -36,10 +37,11 @@ pub fn decode_arm(instruction: u32) -> Result<ArmInstruction, ArmDecodeError> {
             Ok(ArmInstruction::BranchExchange(decoded))
         }
 
-        ArmInstructionKind::Multiply => Ok(ArmInstruction::Multiply {
-            condition,
-            raw: instruction,
-        }),
+        ArmInstructionKind::Multiply => {
+            let decoded = decode_multiply(instruction).map_err(ArmDecodeError::Multiply)?;
+
+            Ok(ArmInstruction::Multiply(decoded))
+        }
 
         ArmInstructionKind::MultiplyLong => Ok(ArmInstruction::MultiplyLong {
             condition,
@@ -196,6 +198,24 @@ mod tests {
                 condition: ArmCondition::Always,
                 link: true,
                 offset: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_typed_mla() {
+        let instruction = decode_arm(0xE020_3291).unwrap();
+
+        assert_eq!(
+            instruction,
+            ArmInstruction::Multiply(crate::cpu::arm::MultiplyInstruction {
+                condition: ArmCondition::Always,
+                accumulate: true,
+                set_flags: false,
+                rd: 0,
+                rn: 3,
+                rs: 2,
+                rm: 1,
             })
         );
     }

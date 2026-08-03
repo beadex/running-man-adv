@@ -368,4 +368,67 @@ mod tests {
 
         assert_eq!(cpu.state(), CpuState::Arm);
     }
+
+    #[test]
+    fn cpu_executes_arm_mul() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        // MUL R0, R1, R2
+        bus.write32(0x0200_0000, 0xE000_0291);
+
+        cpu.registers_mut().write(1, 6);
+        cpu.registers_mut().write(2, 7);
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(0), 42);
+
+        assert_eq!(cpu.registers().pc(), 0x0200_0004);
+    }
+
+    #[test]
+    fn cpu_executes_arm_mla() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        // MLA R0, R1, R2, R3
+        bus.write32(0x0200_0000, 0xE020_3291);
+
+        cpu.registers_mut().write(1, 6);
+        cpu.registers_mut().write(2, 7);
+        cpu.registers_mut().write(3, 10);
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(0), 52);
+    }
+
+    #[test]
+    fn failed_conditional_mla_is_not_executed() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * MLAEQ R0, R1, R2, R3
+         *
+         * Z is clear.
+         */
+        bus.write32(0x0200_0000, 0x0020_3291);
+
+        cpu.registers_mut().write(0, 99);
+        cpu.registers_mut().write(1, 6);
+        cpu.registers_mut().write(2, 7);
+        cpu.registers_mut().write(3, 10);
+
+        cpu.registers_mut().cpsr_mut().set_zero(false);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.registers().read(0), 99);
+    }
 }

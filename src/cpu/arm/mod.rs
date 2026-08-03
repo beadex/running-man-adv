@@ -10,6 +10,8 @@ mod decoder;
 mod executor;
 mod instruction;
 mod instruction_decoder;
+mod multiply;
+mod multiply_executor;
 
 pub use self::alu::{AddResult, AluFlags, add_with_carry, arithmetic_shift_flags, logical_flags};
 
@@ -43,3 +45,9 @@ pub use self::executor::{ArmExecutionError, execute_arm};
 pub use self::instruction::ArmInstruction;
 
 pub use self::instruction_decoder::{ArmDecodeError, decode_arm};
+
+pub use self::multiply::{MultiplyDecodeError, MultiplyInstruction, decode_multiply};
+
+pub use self::multiply_executor::{
+    MultiplyExecutionResult, execute_multiply, multiply_iteration_count,
+};

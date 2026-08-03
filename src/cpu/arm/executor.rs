@@ -2,7 +2,7 @@ use crate::cpu::Registers;
 
 use super::{
     ArmInstruction, BranchExchangeExecutionError, DataProcessingExecutionError, execute_branch,
-    execute_branch_exchange, execute_data_processing,
+    execute_branch_exchange, execute_data_processing, execute_multiply,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,12 @@ pub fn execute_arm(
             execute_branch_exchange(registers, *instruction)
                 .map(|_| ())
                 .map_err(ArmExecutionError::BranchExchange)
+        }
+
+        ArmInstruction::Multiply(instruction) => {
+            execute_multiply(registers, *instruction);
+
+            Ok(())
         }
 
         _ => Err(ArmExecutionError::UnimplementedInstruction),
