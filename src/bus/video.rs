@@ -84,8 +84,20 @@ impl DisplayControl {
         self.raw & Self::FORCED_BLANK_MASK != 0
     }
 
+    pub const fn background_enabled(self, index: usize) -> bool {
+        let mask = match index {
+            0 => Self::BG0_ENABLE_MASK,
+            1 => Self::BG1_ENABLE_MASK,
+            2 => Self::BG2_ENABLE_MASK,
+            3 => Self::BG3_ENABLE_MASK,
+            _ => return false,
+        };
+
+        self.raw & mask != 0
+    }
+
     pub const fn bg2_enabled(self) -> bool {
-        self.raw & Self::BG2_ENABLE_MASK != 0
+        self.background_enabled(2)
     }
 
     pub const fn bg3_enabled(self) -> bool {
@@ -106,6 +118,112 @@ impl DisplayControl {
 }
 
 impl Default for DisplayControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextBackgroundControl {
+    raw: u16,
+}
+
+impl TextBackgroundControl {
+    pub const fn new() -> Self {
+        Self { raw: 0 }
+    }
+
+    pub const fn raw(self) -> u16 {
+        self.raw
+    }
+
+    pub fn write(&mut self, value: u16) {
+        self.raw = value;
+    }
+
+    pub const fn priority(self) -> u8 {
+        (self.raw & 0b11) as u8
+    }
+
+    pub const fn character_base_block(self) -> usize {
+        ((self.raw >> 2) & 0b11) as usize
+    }
+
+    pub const fn color_8bpp(self) -> bool {
+        self.raw & (1 << 7) != 0
+    }
+
+    pub const fn screen_base_block(self) -> usize {
+        ((self.raw >> 8) & 0x1F) as usize
+    }
+
+    pub const fn size(self) -> u8 {
+        ((self.raw >> 14) & 0b11) as u8
+    }
+
+    pub const fn dimensions(self) -> (usize, usize) {
+        match self.size() {
+            0 => (256, 256),
+            1 => (512, 256),
+            2 => (256, 512),
+            3 => (512, 512),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Default for TextBackgroundControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextBackground {
+    control: TextBackgroundControl,
+    horizontal_offset: u16,
+    vertical_offset: u16,
+}
+
+impl TextBackground {
+    pub const fn new() -> Self {
+        Self {
+            control: TextBackgroundControl::new(),
+            horizontal_offset: 0,
+            vertical_offset: 0,
+        }
+    }
+
+    pub const fn control(self) -> TextBackgroundControl {
+        self.control
+    }
+
+    pub const fn read_control(self) -> u16 {
+        self.control.raw()
+    }
+
+    pub fn write_control(&mut self, value: u16) {
+        self.control.write(value);
+    }
+
+    pub const fn horizontal_offset(self) -> u16 {
+        self.horizontal_offset
+    }
+
+    pub const fn vertical_offset(self) -> u16 {
+        self.vertical_offset
+    }
+
+    pub fn write_horizontal_offset(&mut self, value: u16) {
+        self.horizontal_offset = value & 0x01FF;
+    }
+
+    pub fn write_vertical_offset(&mut self, value: u16) {
+        self.vertical_offset = value & 0x01FF;
+    }
+}
+
+impl Default for TextBackground {
     fn default() -> Self {
         Self::new()
     }
@@ -383,6 +501,7 @@ impl ObjectAttributes {
 #[derive(Debug, Clone)]
 pub struct Video {
     display_control: DisplayControl,
+    text_backgrounds: [TextBackground; 4],
     bg2: AffineBackground,
     bg3: AffineBackground,
     framebuffer: Box<Framebuffer>,
@@ -398,6 +517,7 @@ impl Video {
     pub fn new() -> Self {
         Self {
             display_control: DisplayControl::new(),
+            text_backgrounds: [TextBackground::new(); 4],
             bg2: AffineBackground::new(),
             bg3: AffineBackground::new(),
             framebuffer: Box::new([Self::UNIMPLEMENTED_MODE_PIXEL; FRAMEBUFFER_PIXEL_COUNT]),
@@ -429,6 +549,44 @@ impl Video {
         let current = self.display_control.raw();
         self.display_control
             .write((current & 0x00FF) | ((value as u16) << 8));
+    }
+
+    pub const fn text_background(&self, index: usize) -> &TextBackground {
+        &self.text_backgrounds[index]
+    }
+
+    pub fn text_background_mut(&mut self, index: usize) -> &mut TextBackground {
+        &mut self.text_backgrounds[index]
+    }
+
+    pub const fn read_background_control(&self, index: usize) -> u16 {
+        self.text_backgrounds[index].read_control()
+    }
+
+    pub fn write_background_control(&mut self, index: usize, value: u16) {
+        self.text_backgrounds[index].write_control(value);
+
+        match index {
+            2 => self.bg2.write_control(value),
+            3 => self.bg3.write_control(value),
+            _ => {}
+        }
+    }
+
+    pub const fn read_background_horizontal_offset(&self, index: usize) -> u16 {
+        self.text_backgrounds[index].horizontal_offset()
+    }
+
+    pub const fn read_background_vertical_offset(&self, index: usize) -> u16 {
+        self.text_backgrounds[index].vertical_offset()
+    }
+
+    pub fn write_background_horizontal_offset(&mut self, index: usize, value: u16) {
+        self.text_backgrounds[index].write_horizontal_offset(value);
+    }
+
+    pub fn write_background_vertical_offset(&mut self, index: usize, value: u16) {
+        self.text_backgrounds[index].write_vertical_offset(value);
     }
 
     pub const fn affine_background(&self, index: usize) -> &AffineBackground {
@@ -493,6 +651,7 @@ impl Video {
         }
 
         match self.display_control.mode() {
+            VideoMode::Mode0 => self.render_mode0_scanline(line, vram, palette, oam),
             VideoMode::Mode2 => self.render_mode2_scanline(line, vram, palette, oam),
             VideoMode::Mode3 => self.render_mode3_scanline(line, vram, palette, oam),
             VideoMode::Mode4 => self.render_mode4_scanline(line, vram, palette, oam),
@@ -500,6 +659,39 @@ impl Video {
         }
 
         self.advance_affine_scanline();
+    }
+
+    fn render_mode0_scanline(&mut self, line: usize, vram: &[u8], palette: &[u8], oam: &[u8]) {
+        let backdrop = read_palette_color(palette, 0);
+        let destination_start = line * SCREEN_WIDTH;
+
+        self.render_object_scanline(line, vram, palette, oam);
+
+        for x in 0..SCREEN_WIDTH {
+            let mut top_background = None;
+
+            for background_index in 0..4usize {
+                if !self.display_control.background_enabled(background_index) {
+                    continue;
+                }
+
+                let Some(candidate) = sample_text_background(
+                    &self.text_backgrounds[background_index],
+                    background_index,
+                    x,
+                    line,
+                    vram,
+                    palette,
+                ) else {
+                    continue;
+                };
+
+                top_background = choose_top_background(top_background, Some(candidate));
+            }
+
+            self.framebuffer[destination_start + x] =
+                compose_background_and_object(top_background, self.object_line[x], backdrop);
+        }
     }
 
     fn render_mode2_scanline(&mut self, line: usize, vram: &[u8], palette: &[u8], oam: &[u8]) {
@@ -585,13 +777,7 @@ impl Video {
         }
     }
 
-    fn render_mode4_scanline(
-        &mut self,
-        line: usize,
-        vram: &[u8],
-        palette: &[u8],
-        oam: &[u8],
-    ) {
+    fn render_mode4_scanline(&mut self, line: usize, vram: &[u8], palette: &[u8], oam: &[u8]) {
         /*
          * Mode 4:
          *
@@ -617,10 +803,7 @@ impl Video {
 
         for x in 0..SCREEN_WIDTH {
             let background = if self.display_control.bg2_enabled() {
-                let palette_index = vram
-                    .get(source_line_start + x)
-                    .copied()
-                    .unwrap_or(0);
+                let palette_index = vram.get(source_line_start + x).copied().unwrap_or(0);
 
                 Some(BackgroundPixel {
                     color: read_palette_color(palette, palette_index),
@@ -636,13 +819,7 @@ impl Video {
         }
     }
 
-    fn render_object_scanline(
-        &mut self,
-        line: usize,
-        vram: &[u8],
-        palette: &[u8],
-        oam: &[u8],
-    ) {
+    fn render_object_scanline(&mut self, line: usize, vram: &[u8], palette: &[u8], oam: &[u8]) {
         self.object_line.fill(None);
 
         if !self.display_control.obj_enabled() {
@@ -689,7 +866,9 @@ impl Video {
 
             let object_x = sign_extend_object_x(attributes.x());
             let start_x = object_x.max(0) as usize;
-            let end_x = (object_x + display_width as i32).min(SCREEN_WIDTH as i32).max(0) as usize;
+            let end_x = (object_x + display_width as i32)
+                .min(SCREEN_WIDTH as i32)
+                .max(0) as usize;
 
             for screen_x in start_x..end_x {
                 let local_x = screen_x as i32 - object_x;
@@ -757,6 +936,7 @@ impl Video {
 
     pub fn reset(&mut self) {
         self.display_control.reset();
+        self.text_backgrounds = [TextBackground::new(); 4];
         self.bg2.reset();
         self.bg3.reset();
         self.framebuffer.fill(Self::UNIMPLEMENTED_MODE_PIXEL);
@@ -770,6 +950,98 @@ impl Default for Video {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn choose_top_background(
+    current: Option<BackgroundPixel>,
+    candidate: Option<BackgroundPixel>,
+) -> Option<BackgroundPixel> {
+    match (current, candidate) {
+        (Some(current), Some(candidate)) => {
+            if candidate.priority < current.priority
+                || (candidate.priority == current.priority && candidate.layer < current.layer)
+            {
+                Some(candidate)
+            } else {
+                Some(current)
+            }
+        }
+        (None, candidate) => candidate,
+        (current, None) => current,
+    }
+}
+
+fn sample_text_background(
+    background: &TextBackground,
+    layer: usize,
+    screen_x: usize,
+    screen_y: usize,
+    vram: &[u8],
+    palette: &[u8],
+) -> Option<BackgroundPixel> {
+    let control = background.control();
+    let (map_width, map_height) = control.dimensions();
+
+    let background_x = (screen_x + background.horizontal_offset() as usize) & (map_width - 1);
+    let background_y = (screen_y + background.vertical_offset() as usize) & (map_height - 1);
+
+    let tile_x = background_x / 8;
+    let tile_y = background_y / 8;
+    let block_x = tile_x / 32;
+    let block_y = tile_y / 32;
+    let blocks_per_row = map_width / 256;
+    let screen_block = block_y * blocks_per_row + block_x;
+
+    let entry_x = tile_x & 31;
+    let entry_y = tile_y & 31;
+    let map_base = control.screen_base_block() * 0x800;
+    let entry_offset = map_base + screen_block * 0x800 + (entry_y * 32 + entry_x) * 2;
+    let entry = read_u16(vram, entry_offset)?;
+
+    let tile_number = (entry & 0x03FF) as usize;
+    let horizontal_flip = entry & (1 << 10) != 0;
+    let vertical_flip = entry & (1 << 11) != 0;
+    let palette_bank = ((entry >> 12) & 0x0F) as usize;
+
+    let mut pixel_x = background_x & 7;
+    let mut pixel_y = background_y & 7;
+
+    if horizontal_flip {
+        pixel_x = 7 - pixel_x;
+    }
+    if vertical_flip {
+        pixel_y = 7 - pixel_y;
+    }
+
+    let character_base = control.character_base_block() * 0x4000;
+    let palette_index = if control.color_8bpp() {
+        let tile_offset = character_base + tile_number * 64 + pixel_y * 8 + pixel_x;
+        vram.get(tile_offset).copied().unwrap_or(0) as usize
+    } else {
+        let tile_offset = character_base + tile_number * 32 + pixel_y * 4 + pixel_x / 2;
+        let packed = vram.get(tile_offset).copied().unwrap_or(0);
+        let index = if pixel_x & 1 == 0 {
+            packed & 0x0F
+        } else {
+            packed >> 4
+        };
+
+        if index == 0 {
+            return None;
+        }
+
+        palette_bank * 16 + index as usize
+    };
+
+    if palette_index == 0 {
+        return None;
+    }
+
+    Some(BackgroundPixel {
+        color: read_palette_color_usize(palette, palette_index),
+        priority: control.priority(),
+        layer: layer as u8,
+    })
 }
 
 fn sample_affine_background(
@@ -1582,4 +1854,100 @@ mod tests {
         assert_eq!(video.framebuffer()[8], 0xFF00_00FF);
     }
 
+    #[test]
+    fn mode0_renders_4bpp_text_background() {
+        let mut video = Video::new();
+        video.write_display_control(1 << 8);
+        video.write_background_control(0, 1 << 8);
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let oam = vec![0u8; 0x400];
+
+        vram[0x800..0x802].copy_from_slice(&1u16.to_le_bytes());
+        vram[32] = 0x01;
+        palette[2..4].copy_from_slice(&0x001Fu16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+        assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+    }
+
+    #[test]
+    fn mode0_renders_8bpp_text_background() {
+        let mut video = Video::new();
+        video.write_display_control(1 << 9);
+        video.write_background_control(1, (1 << 7) | (1 << 8));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let oam = vec![0u8; 0x400];
+
+        vram[0x800..0x802].copy_from_slice(&1u16.to_le_bytes());
+        vram[64] = 2;
+        palette[4..6].copy_from_slice(&0x03E0u16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+        assert_eq!(video.framebuffer()[0], 0xFF00_FF00);
+    }
+
+    #[test]
+    fn mode0_applies_scroll_and_tile_flip() {
+        let mut video = Video::new();
+        video.write_display_control(1 << 8);
+        video.write_background_control(0, 1 << 8);
+        video.write_background_horizontal_offset(0, 1);
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let oam = vec![0u8; 0x400];
+
+        let entry = 1u16 | (1 << 10);
+        vram[0x800..0x802].copy_from_slice(&entry.to_le_bytes());
+        vram[32 + 3] = 0x10;
+        palette[2..4].copy_from_slice(&0x7C00u16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+        assert_eq!(video.framebuffer()[0], 0xFF00_00FF);
+    }
+
+    #[test]
+    fn mode0_selects_extended_screen_blocks() {
+        let mut video = Video::new();
+        video.write_display_control(1 << 8);
+        video.write_background_control(0, (1 << 8) | (1 << 14));
+        video.write_background_horizontal_offset(0, 256);
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let oam = vec![0u8; 0x400];
+
+        vram[0x1000..0x1002].copy_from_slice(&1u16.to_le_bytes());
+        vram[32] = 0x01;
+        palette[2..4].copy_from_slice(&0x7FFFu16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+        assert_eq!(video.framebuffer()[0], 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn mode0_lower_bg_index_wins_equal_priority() {
+        let mut video = Video::new();
+        video.write_display_control((1 << 8) | (1 << 9));
+        video.write_background_control(0, 1 << 8);
+        video.write_background_control(1, 2 << 8);
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let oam = vec![0u8; 0x400];
+
+        vram[0x800..0x802].copy_from_slice(&1u16.to_le_bytes());
+        vram[0x1000..0x1002].copy_from_slice(&2u16.to_le_bytes());
+        vram[32] = 0x01;
+        vram[64] = 0x02;
+        palette[2..4].copy_from_slice(&0x001Fu16.to_le_bytes());
+        palette[4..6].copy_from_slice(&0x7C00u16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+        assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+    }
 }

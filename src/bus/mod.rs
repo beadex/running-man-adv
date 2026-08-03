@@ -31,7 +31,8 @@ pub use self::timer::{TIMER_COUNT, Timer, TimerControl, TimerController, TimerIn
 
 pub use self::video::{
     AffineBackground, AffineBackgroundControl, DisplayControl, FRAMEBUFFER_PIXEL_COUNT,
-    Framebuffer, SCREEN_HEIGHT, SCREEN_WIDTH, Video, VideoMode, bgr555_to_rgba8888,
+    Framebuffer, SCREEN_HEIGHT, SCREEN_WIDTH, TextBackground, TextBackgroundControl, Video,
+    VideoMode, bgr555_to_rgba8888,
 };
 
 pub use self::waitstate::{AccessKind, AccessWidth, MemoryRegion, TimedAccess, WaitControl};
@@ -185,8 +186,19 @@ impl Bus {
 
     pub const REG_DISPCNT: u32 = IoRegisters::BASE + IoRegisters::DISPCNT_OFFSET;
 
+    pub const REG_BG0CNT: u32 = IoRegisters::BASE + IoRegisters::BG0CNT_OFFSET;
+    pub const REG_BG1CNT: u32 = IoRegisters::BASE + IoRegisters::BG1CNT_OFFSET;
     pub const REG_BG2CNT: u32 = IoRegisters::BASE + IoRegisters::BG2CNT_OFFSET;
     pub const REG_BG3CNT: u32 = IoRegisters::BASE + IoRegisters::BG3CNT_OFFSET;
+
+    pub const REG_BG0HOFS: u32 = IoRegisters::BASE + IoRegisters::BG0HOFS_OFFSET;
+    pub const REG_BG0VOFS: u32 = IoRegisters::BASE + IoRegisters::BG0VOFS_OFFSET;
+    pub const REG_BG1HOFS: u32 = IoRegisters::BASE + IoRegisters::BG1HOFS_OFFSET;
+    pub const REG_BG1VOFS: u32 = IoRegisters::BASE + IoRegisters::BG1VOFS_OFFSET;
+    pub const REG_BG2HOFS: u32 = IoRegisters::BASE + IoRegisters::BG2HOFS_OFFSET;
+    pub const REG_BG2VOFS: u32 = IoRegisters::BASE + IoRegisters::BG2VOFS_OFFSET;
+    pub const REG_BG3HOFS: u32 = IoRegisters::BASE + IoRegisters::BG3HOFS_OFFSET;
+    pub const REG_BG3VOFS: u32 = IoRegisters::BASE + IoRegisters::BG3VOFS_OFFSET;
 
     pub const REG_BG2PA: u32 = IoRegisters::BASE + IoRegisters::BG2PA_OFFSET;
     pub const REG_BG2PB: u32 = IoRegisters::BASE + IoRegisters::BG2PB_OFFSET;

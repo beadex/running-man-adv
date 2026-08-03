@@ -61,8 +61,19 @@ impl IoRegisters {
     pub const DISPSTAT_OFFSET: u32 = 0x0004;
     pub const VCOUNT_OFFSET: u32 = 0x0006;
 
+    pub const BG0CNT_OFFSET: u32 = 0x0008;
+    pub const BG1CNT_OFFSET: u32 = 0x000A;
     pub const BG2CNT_OFFSET: u32 = 0x000C;
     pub const BG3CNT_OFFSET: u32 = 0x000E;
+
+    pub const BG0HOFS_OFFSET: u32 = 0x0010;
+    pub const BG0VOFS_OFFSET: u32 = 0x0012;
+    pub const BG1HOFS_OFFSET: u32 = 0x0014;
+    pub const BG1VOFS_OFFSET: u32 = 0x0016;
+    pub const BG2HOFS_OFFSET: u32 = 0x0018;
+    pub const BG2VOFS_OFFSET: u32 = 0x001A;
+    pub const BG3HOFS_OFFSET: u32 = 0x001C;
+    pub const BG3VOFS_OFFSET: u32 = 0x001E;
 
     pub const BG2PA_OFFSET: u32 = 0x0020;
     pub const BG2PB_OFFSET: u32 = 0x0022;
@@ -264,8 +275,18 @@ impl IoRegisters {
             Self::DISPCNT_OFFSET
                 | Self::DISPSTAT_OFFSET
                 | Self::VCOUNT_OFFSET
+                | Self::BG0CNT_OFFSET
+                | Self::BG1CNT_OFFSET
                 | Self::BG2CNT_OFFSET
                 | Self::BG3CNT_OFFSET
+                | Self::BG0HOFS_OFFSET
+                | Self::BG0VOFS_OFFSET
+                | Self::BG1HOFS_OFFSET
+                | Self::BG1VOFS_OFFSET
+                | Self::BG2HOFS_OFFSET
+                | Self::BG2VOFS_OFFSET
+                | Self::BG3HOFS_OFFSET
+                | Self::BG3VOFS_OFFSET
                 | Self::BG2PA_OFFSET
                 | Self::BG2PB_OFFSET
                 | Self::BG2PC_OFFSET
@@ -478,8 +499,19 @@ impl IoRegisters {
                 return self.ppu.vcount();
             }
 
-            Self::BG2CNT_OFFSET => return self.video.affine_background(2).read_control(),
-            Self::BG3CNT_OFFSET => return self.video.affine_background(3).read_control(),
+            Self::BG0CNT_OFFSET => return self.video.read_background_control(0),
+            Self::BG1CNT_OFFSET => return self.video.read_background_control(1),
+            Self::BG2CNT_OFFSET => return self.video.read_background_control(2),
+            Self::BG3CNT_OFFSET => return self.video.read_background_control(3),
+
+            Self::BG0HOFS_OFFSET => return self.video.read_background_horizontal_offset(0),
+            Self::BG0VOFS_OFFSET => return self.video.read_background_vertical_offset(0),
+            Self::BG1HOFS_OFFSET => return self.video.read_background_horizontal_offset(1),
+            Self::BG1VOFS_OFFSET => return self.video.read_background_vertical_offset(1),
+            Self::BG2HOFS_OFFSET => return self.video.read_background_horizontal_offset(2),
+            Self::BG2VOFS_OFFSET => return self.video.read_background_vertical_offset(2),
+            Self::BG3HOFS_OFFSET => return self.video.read_background_horizontal_offset(3),
+            Self::BG3VOFS_OFFSET => return self.video.read_background_vertical_offset(3),
 
             Self::BG2PA_OFFSET => return self.video.affine_background(2).read_pa(),
             Self::BG2PB_OFFSET => return self.video.affine_background(2).read_pb(),
@@ -599,12 +631,53 @@ impl IoRegisters {
                 return;
             }
 
+            Self::BG0CNT_OFFSET => {
+                self.video.write_background_control(0, value);
+                return;
+            }
+            Self::BG1CNT_OFFSET => {
+                self.video.write_background_control(1, value);
+                return;
+            }
             Self::BG2CNT_OFFSET => {
-                self.video.affine_background_mut(2).write_control(value);
+                self.video.write_background_control(2, value);
                 return;
             }
             Self::BG3CNT_OFFSET => {
-                self.video.affine_background_mut(3).write_control(value);
+                self.video.write_background_control(3, value);
+                return;
+            }
+
+            Self::BG0HOFS_OFFSET => {
+                self.video.write_background_horizontal_offset(0, value);
+                return;
+            }
+            Self::BG0VOFS_OFFSET => {
+                self.video.write_background_vertical_offset(0, value);
+                return;
+            }
+            Self::BG1HOFS_OFFSET => {
+                self.video.write_background_horizontal_offset(1, value);
+                return;
+            }
+            Self::BG1VOFS_OFFSET => {
+                self.video.write_background_vertical_offset(1, value);
+                return;
+            }
+            Self::BG2HOFS_OFFSET => {
+                self.video.write_background_horizontal_offset(2, value);
+                return;
+            }
+            Self::BG2VOFS_OFFSET => {
+                self.video.write_background_vertical_offset(2, value);
+                return;
+            }
+            Self::BG3HOFS_OFFSET => {
+                self.video.write_background_horizontal_offset(3, value);
+                return;
+            }
+            Self::BG3VOFS_OFFSET => {
+                self.video.write_background_vertical_offset(3, value);
                 return;
             }
 
@@ -927,8 +1000,18 @@ enum TimerRegister {
 const fn is_affine_video_register(offset: u32) -> bool {
     matches!(
         offset,
-        IoRegisters::BG2CNT_OFFSET
+        IoRegisters::BG0CNT_OFFSET
+            | IoRegisters::BG1CNT_OFFSET
+            | IoRegisters::BG2CNT_OFFSET
             | IoRegisters::BG3CNT_OFFSET
+            | IoRegisters::BG0HOFS_OFFSET
+            | IoRegisters::BG0VOFS_OFFSET
+            | IoRegisters::BG1HOFS_OFFSET
+            | IoRegisters::BG1VOFS_OFFSET
+            | IoRegisters::BG2HOFS_OFFSET
+            | IoRegisters::BG2VOFS_OFFSET
+            | IoRegisters::BG3HOFS_OFFSET
+            | IoRegisters::BG3VOFS_OFFSET
             | IoRegisters::BG2PA_OFFSET
             | IoRegisters::BG2PB_OFFSET
             | IoRegisters::BG2PC_OFFSET
@@ -1506,5 +1589,19 @@ mod tests {
         io.write8(IoRegisters::BG2PA_OFFSET + 1, 0x12);
 
         assert_eq!(io.read16(IoRegisters::BG2PA_OFFSET), 0x1234);
+    }
+    #[test]
+    fn mode0_background_registers_are_mapped() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::BG0CNT_OFFSET, 0x1234);
+        io.write16(IoRegisters::BG1CNT_OFFSET, 0x5678);
+        io.write16(IoRegisters::BG0HOFS_OFFSET, 0x03FF);
+        io.write16(IoRegisters::BG0VOFS_OFFSET, 0x0123);
+
+        assert_eq!(io.read16(IoRegisters::BG0CNT_OFFSET), 0x1234);
+        assert_eq!(io.read16(IoRegisters::BG1CNT_OFFSET), 0x5678);
+        assert_eq!(io.read16(IoRegisters::BG0HOFS_OFFSET), 0x01FF);
+        assert_eq!(io.read16(IoRegisters::BG0VOFS_OFFSET), 0x0123);
     }
 }
