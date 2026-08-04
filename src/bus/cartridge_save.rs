@@ -1,16 +1,22 @@
-const SRAM_SIZE: usize = 64 * 1024;
+const SRAM_SIZE: usize = 32 * 1024;
+const LEGACY_SRAM_SIZE: usize = 64 * 1024;
+const FLASH_512_SIZE: usize = 64 * 1024;
 const FLASH_1M_SIZE: usize = 128 * 1024;
 const FLASH_BANK_SIZE: usize = 64 * 1024;
 const FLASH_SECTOR_SIZE: usize = 4 * 1024;
 const EEPROM_512_SIZE: usize = 512;
 const EEPROM_8K_SIZE: usize = 8 * 1024;
 
-const FLASH_MAKER_ID: u8 = 0x62;
-const FLASH_DEVICE_ID: u8 = 0x13;
+const FLASH_512_MAKER_ID: u8 = 0x32;
+const FLASH_512_DEVICE_ID: u8 = 0x1B;
+const FLASH_1M_MAKER_ID: u8 = 0x62;
+const FLASH_1M_DEVICE_ID: u8 = 0x13;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CartridgeSaveType {
+    None,
     Sram,
+    Flash512,
     Flash1M,
     EepromUnknown,
     Eeprom512,
@@ -20,7 +26,9 @@ pub enum CartridgeSaveType {
 impl CartridgeSaveType {
     pub const fn size(self) -> usize {
         match self {
+            Self::None => 0,
             Self::Sram => SRAM_SIZE,
+            Self::Flash512 => FLASH_512_SIZE,
             Self::Flash1M => FLASH_1M_SIZE,
             Self::EepromUnknown | Self::Eeprom8K => EEPROM_8K_SIZE,
             Self::Eeprom512 => EEPROM_512_SIZE,
@@ -29,7 +37,9 @@ impl CartridgeSaveType {
 
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Sram => "SRAM",
+            Self::None => "No save hardware",
+            Self::Sram => "SRAM 256K",
+            Self::Flash512 => "Flash 512K",
             Self::Flash1M => "Flash 1M",
             Self::EepromUnknown => "EEPROM (size undetected)",
             Self::Eeprom512 => "EEPROM 512 B",
@@ -67,8 +77,9 @@ impl std::error::Error for CartridgeSaveLoadError {}
 
 #[derive(Debug, Clone)]
 enum CartridgeSaveStorage {
+    None,
     Sram(Box<[u8; SRAM_SIZE]>),
-    Flash1M(Flash1M),
+    Flash(Flash),
     Eeprom(Eeprom),
 }
 
@@ -83,9 +94,13 @@ impl CartridgeSave {
         let storage = if contains_signature(rom, b"EEPROM_V") {
             CartridgeSaveStorage::Eeprom(Eeprom::new())
         } else if contains_signature(rom, b"FLASH1M_V") {
-            CartridgeSaveStorage::Flash1M(Flash1M::new())
-        } else {
+            CartridgeSaveStorage::Flash(Flash::new(FlashKind::Flash1M))
+        } else if contains_signature(rom, b"FLASH512_V") || contains_signature(rom, b"FLASH_V") {
+            CartridgeSaveStorage::Flash(Flash::new(FlashKind::Flash512))
+        } else if contains_signature(rom, b"SRAM_V") || contains_signature(rom, b"SRAM_F_V") {
             CartridgeSaveStorage::Sram(Box::new([0xFF; SRAM_SIZE]))
+        } else {
+            CartridgeSaveStorage::None
         };
 
         Self {
@@ -96,22 +111,25 @@ impl CartridgeSave {
 
     pub const fn save_type(&self) -> CartridgeSaveType {
         match &self.storage {
+            CartridgeSaveStorage::None => CartridgeSaveType::None,
             CartridgeSaveStorage::Sram(_) => CartridgeSaveType::Sram,
-            CartridgeSaveStorage::Flash1M(_) => CartridgeSaveType::Flash1M,
+            CartridgeSaveStorage::Flash(flash) => flash.save_type(),
             CartridgeSaveStorage::Eeprom(eeprom) => eeprom.save_type(),
         }
     }
 
     pub fn data(&self) -> &[u8] {
         match &self.storage {
+            CartridgeSaveStorage::None => &[],
             CartridgeSaveStorage::Sram(storage) => storage.as_slice(),
-            CartridgeSaveStorage::Flash1M(flash) => flash.data(),
+            CartridgeSaveStorage::Flash(flash) => flash.data(),
             CartridgeSaveStorage::Eeprom(eeprom) => eeprom.data(),
         }
     }
 
     pub fn load_data(&mut self, data: &[u8]) -> Result<(), CartridgeSaveLoadError> {
         let (expected, alternate_expected) = match &self.storage {
+            CartridgeSaveStorage::Sram(_) => (SRAM_SIZE, Some(LEGACY_SRAM_SIZE)),
             CartridgeSaveStorage::Eeprom(_) => (EEPROM_512_SIZE, Some(EEPROM_8K_SIZE)),
             _ => (self.save_type().size(), None),
         };
@@ -125,8 +143,11 @@ impl CartridgeSave {
         }
 
         match &mut self.storage {
-            CartridgeSaveStorage::Sram(storage) => storage.copy_from_slice(data),
-            CartridgeSaveStorage::Flash1M(flash) => flash.load_data(data),
+            CartridgeSaveStorage::None => {}
+            CartridgeSaveStorage::Sram(storage) => {
+                storage.copy_from_slice(&data[..SRAM_SIZE]);
+            }
+            CartridgeSaveStorage::Flash(flash) => flash.load_data(data),
             CartridgeSaveStorage::Eeprom(eeprom) => eeprom.load_data(data),
         }
 
@@ -145,21 +166,23 @@ impl CartridgeSave {
 
     pub fn read8(&self, offset: usize) -> u8 {
         match &self.storage {
+            CartridgeSaveStorage::None => 0xFF,
             CartridgeSaveStorage::Sram(storage) => storage[offset % SRAM_SIZE],
-            CartridgeSaveStorage::Flash1M(flash) => flash.read8(offset),
+            CartridgeSaveStorage::Flash(flash) => flash.read8(offset),
             CartridgeSaveStorage::Eeprom(_) => 0xFF,
         }
     }
 
     pub fn write8(&mut self, offset: usize, value: u8) {
         let changed = match &mut self.storage {
+            CartridgeSaveStorage::None => false,
             CartridgeSaveStorage::Sram(storage) => {
                 let index = offset % SRAM_SIZE;
                 let changed = storage[index] != value;
                 storage[index] = value;
                 changed
             }
-            CartridgeSaveStorage::Flash1M(flash) => flash.write8(offset, value),
+            CartridgeSaveStorage::Flash(flash) => flash.write8(offset, value),
             CartridgeSaveStorage::Eeprom(_) => false,
         };
 
@@ -167,7 +190,7 @@ impl CartridgeSave {
     }
 
     pub fn reset_protocol(&mut self) {
-        if let CartridgeSaveStorage::Flash1M(flash) = &mut self.storage {
+        if let CartridgeSaveStorage::Flash(flash) = &mut self.storage {
             flash.reset_protocol();
         }
 
@@ -437,18 +460,53 @@ enum FlashCommandState {
     EraseCommand,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlashKind {
+    Flash512,
+    Flash1M,
+}
+
+impl FlashKind {
+    const fn size(self) -> usize {
+        match self {
+            Self::Flash512 => FLASH_512_SIZE,
+            Self::Flash1M => FLASH_1M_SIZE,
+        }
+    }
+
+    const fn save_type(self) -> CartridgeSaveType {
+        match self {
+            Self::Flash512 => CartridgeSaveType::Flash512,
+            Self::Flash1M => CartridgeSaveType::Flash1M,
+        }
+    }
+
+    const fn ids(self) -> (u8, u8) {
+        match self {
+            Self::Flash512 => (FLASH_512_MAKER_ID, FLASH_512_DEVICE_ID),
+            Self::Flash1M => (FLASH_1M_MAKER_ID, FLASH_1M_DEVICE_ID),
+        }
+    }
+
+    const fn banked(self) -> bool {
+        matches!(self, Self::Flash1M)
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct Flash1M {
-    storage: Box<[u8; FLASH_1M_SIZE]>,
+struct Flash {
+    kind: FlashKind,
+    storage: Vec<u8>,
     bank: usize,
     id_mode: bool,
     command_state: FlashCommandState,
 }
 
-impl Flash1M {
-    pub fn new() -> Self {
+impl Flash {
+    fn new(kind: FlashKind) -> Self {
         Self {
-            storage: Box::new([0xFF; FLASH_1M_SIZE]),
+            kind,
+            storage: vec![0xFF; kind.size()],
             bank: 0,
             id_mode: false,
             command_state: FlashCommandState::Ready,
@@ -459,9 +517,11 @@ impl Flash1M {
         let offset = offset % FLASH_BANK_SIZE;
 
         if self.id_mode {
+            let (maker, device) = self.kind.ids();
+
             return match offset {
-                0 => FLASH_MAKER_ID,
-                1 => FLASH_DEVICE_ID,
+                0 => maker,
+                1 => device,
                 _ => 0xFF,
             };
         }
@@ -502,7 +562,7 @@ impl Flash1M {
                             FlashCommandState::Ready
                         }
                         0xA0 => FlashCommandState::Program,
-                        0xB0 => FlashCommandState::SelectBank,
+                        0xB0 if self.kind.banked() => FlashCommandState::SelectBank,
                         0x80 => FlashCommandState::EraseUnlock1,
                         _ => FlashCommandState::Ready,
                     }
@@ -565,8 +625,12 @@ impl Flash1M {
         self.storage.as_slice()
     }
 
+    const fn save_type(&self) -> CartridgeSaveType {
+        self.kind.save_type()
+    }
+
     pub fn load_data(&mut self, data: &[u8]) {
-        debug_assert_eq!(data.len(), FLASH_1M_SIZE);
+        debug_assert_eq!(data.len(), self.kind.size());
         self.storage.copy_from_slice(data);
         self.reset_protocol();
     }
@@ -578,23 +642,20 @@ impl Flash1M {
     }
 }
 
-impl Default for Flash1M {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CartridgeSave, CartridgeSaveType, FLASH_DEVICE_ID, FLASH_MAKER_ID, Flash1M};
+    use super::{
+        CartridgeSave, CartridgeSaveType, FLASH_1M_DEVICE_ID, FLASH_1M_MAKER_ID,
+        FLASH_512_DEVICE_ID, FLASH_512_MAKER_ID, Flash, FlashKind,
+    };
 
-    fn command(flash: &mut Flash1M, value: u8) {
+    fn command(flash: &mut Flash, value: u8) {
         flash.write8(0x5555, 0xAA);
         flash.write8(0x2AAA, 0x55);
         flash.write8(0x5555, value);
     }
 
-    fn program(flash: &mut Flash1M, offset: usize, value: u8) {
+    fn program(flash: &mut Flash, offset: usize, value: u8) {
         command(flash, 0xA0);
         flash.write8(offset, value);
     }
@@ -643,10 +704,32 @@ mod tests {
     }
 
     #[test]
-    fn unknown_save_signature_keeps_sram_backend() {
+    fn flash_512_signatures_select_64k_flash_backend() {
+        for signature in [b"FLASH_V126".as_slice(), b"FLASH512_V133".as_slice()] {
+            let save = CartridgeSave::from_rom(signature);
+
+            assert_eq!(save.save_type(), CartridgeSaveType::Flash512);
+            assert_eq!(save.data().len(), 64 * 1024);
+        }
+    }
+
+    #[test]
+    fn sram_signatures_select_32k_sram_backend() {
+        for signature in [b"SRAM_V110".as_slice(), b"SRAM_F_V100".as_slice()] {
+            let save = CartridgeSave::from_rom(signature);
+
+            assert_eq!(save.save_type(), CartridgeSaveType::Sram);
+            assert_eq!(save.data().len(), 32 * 1024);
+        }
+    }
+
+    #[test]
+    fn unknown_save_signature_selects_no_save_hardware() {
         let save = CartridgeSave::from_rom(b"no known save type");
 
-        assert_eq!(save.save_type(), CartridgeSaveType::Sram);
+        assert_eq!(save.save_type(), CartridgeSaveType::None);
+        assert!(save.data().is_empty());
+        assert_eq!(save.read8(0), 0xFF);
     }
 
     #[test]
@@ -755,12 +838,31 @@ mod tests {
     }
 
     #[test]
+    fn sram_accepts_legacy_64k_files_and_keeps_the_first_32k() {
+        let mut save = CartridgeSave::from_rom(b"SRAM_V110");
+        let mut legacy = vec![0xFF; 64 * 1024];
+        legacy[0x1234] = 0x5A;
+        legacy[32 * 1024 + 0x1234] = 0xA5;
+
+        save.load_data(&legacy).unwrap();
+
+        assert_eq!(save.data().len(), 32 * 1024);
+        assert_eq!(save.data()[0x1234], 0x5A);
+        assert!(!save.is_dirty());
+
+        let error = save.load_data(&legacy[..legacy.len() - 1]).unwrap_err();
+        assert_eq!(error.expected, 32 * 1024);
+        assert_eq!(error.alternate_expected, Some(64 * 1024));
+        assert_eq!(error.actual, 64 * 1024 - 1);
+    }
+
+    #[test]
     fn dirty_state_tracks_only_persistent_data_changes() {
         let mut save = CartridgeSave::from_rom(b"FLASH1M_V103");
 
         command(
             match &mut save.storage {
-                super::CartridgeSaveStorage::Flash1M(flash) => flash,
+                super::CartridgeSaveStorage::Flash(flash) => flash,
                 _ => unreachable!(),
             },
             0x90,
@@ -784,13 +886,20 @@ mod tests {
     }
 
     #[test]
-    fn id_mode_reports_supported_one_megabit_flash() {
-        let mut flash = Flash1M::new();
+    fn id_mode_reports_ids_for_both_flash_sizes() {
+        let mut flash = Flash::new(FlashKind::Flash512);
 
         command(&mut flash, 0x90);
 
-        assert_eq!(flash.read8(0), FLASH_MAKER_ID);
-        assert_eq!(flash.read8(1), FLASH_DEVICE_ID);
+        assert_eq!(flash.read8(0), FLASH_512_MAKER_ID);
+        assert_eq!(flash.read8(1), FLASH_512_DEVICE_ID);
+
+        let mut flash = Flash::new(FlashKind::Flash1M);
+
+        command(&mut flash, 0x90);
+
+        assert_eq!(flash.read8(0), FLASH_1M_MAKER_ID);
+        assert_eq!(flash.read8(1), FLASH_1M_DEVICE_ID);
 
         command(&mut flash, 0xF0);
 
@@ -799,7 +908,7 @@ mod tests {
 
     #[test]
     fn programming_and_sector_erase_follow_flash_semantics() {
-        let mut flash = Flash1M::new();
+        let mut flash = Flash::new(FlashKind::Flash512);
 
         program(&mut flash, 0x2345, 0x5A);
         program(&mut flash, 0x2345, 0xF0);
@@ -816,7 +925,7 @@ mod tests {
 
     #[test]
     fn bank_select_exposes_independent_64k_halves() {
-        let mut flash = Flash1M::new();
+        let mut flash = Flash::new(FlashKind::Flash1M);
 
         program(&mut flash, 0x1234, 0x11);
 
@@ -828,6 +937,17 @@ mod tests {
 
         command(&mut flash, 0xB0);
         flash.write8(0, 0);
+
+        assert_eq!(flash.read8(0x1234), 0x11);
+    }
+
+    #[test]
+    fn flash_512_ignores_bank_select_command() {
+        let mut flash = Flash::new(FlashKind::Flash512);
+        program(&mut flash, 0x1234, 0x11);
+
+        command(&mut flash, 0xB0);
+        flash.write8(0, 1);
 
         assert_eq!(flash.read8(0x1234), 0x11);
     }

@@ -30,6 +30,10 @@ impl SaveFile {
     }
 
     pub fn load(&self, gba: &mut Gba) -> Result<bool> {
+        if gba.cartridge_save_type() == crate::bus::CartridgeSaveType::None {
+            return Ok(false);
+        }
+
         let data = match fs::read(&self.path) {
             Ok(data) => data,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -214,6 +218,27 @@ mod tests {
     }
 
     #[test]
+    fn flash_512_save_round_trips_through_disk() {
+        let path = temporary_save_path("flash-512-round-trip");
+        let save_file = SaveFile::new(path.clone());
+        let mut first = Gba::new();
+        first.load_rom(b"FLASH512_V133").unwrap();
+        program_flash(&mut first, 0x3456, 0x69);
+
+        assert_eq!(first.cartridge_save_type(), CartridgeSaveType::Flash512);
+        assert!(save_file.flush_if_dirty(&mut first).unwrap());
+        assert_eq!(fs::metadata(&path).unwrap().len(), 64 * 1024);
+
+        let mut second = Gba::new();
+        second.load_rom(b"FLASH512_V133").unwrap();
+        assert!(save_file.load(&mut second).unwrap());
+        assert_eq!(second.bus().read8(SAVE_BASE + 0x3456), 0x69);
+        assert!(!second.cartridge_save_dirty());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn invalid_existing_file_is_rejected_without_becoming_dirty() {
         let path = temporary_save_path("invalid-size");
         fs::write(&path, [0xA5; 17]).unwrap();
@@ -249,12 +274,55 @@ mod tests {
         first.bus_mut().write8(SAVE_BASE + 0x4321, 0x7C);
 
         assert!(save_file.flush_if_dirty(&mut first).unwrap());
-        assert_eq!(fs::metadata(&path).unwrap().len(), 64 * 1024);
+        assert_eq!(fs::metadata(&path).unwrap().len(), 32 * 1024);
 
         let mut second = Gba::new();
         second.load_rom(b"SRAM_V110").unwrap();
         assert!(save_file.load(&mut second).unwrap());
         assert_eq!(second.bus().read8(SAVE_BASE + 0x4321), 0x7C);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_64k_sram_is_loaded_and_normalized_on_the_next_write() {
+        let path = temporary_save_path("legacy-sram");
+        let mut legacy = vec![0xFF; 64 * 1024];
+        legacy[0x1234] = 0x5A;
+        legacy[32 * 1024 + 0x1234] = 0xA5;
+        fs::write(&path, legacy).unwrap();
+
+        let save_file = SaveFile::new(path.clone());
+        let mut gba = Gba::new();
+        gba.load_rom(b"SRAM_V110").unwrap();
+
+        assert!(save_file.load(&mut gba).unwrap());
+        assert_eq!(gba.cartridge_save_data().len(), 32 * 1024);
+        assert_eq!(gba.bus().read8(SAVE_BASE + 0x1234), 0x5A);
+        assert!(!gba.cartridge_save_dirty());
+
+        gba.bus_mut().write8(SAVE_BASE + 0x1235, 0x7C);
+        assert!(save_file.flush_if_dirty(&mut gba).unwrap());
+        assert_eq!(fs::metadata(&path).unwrap().len(), 32 * 1024);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn no_save_hardware_ignores_stale_save_files_and_writes() {
+        let path = temporary_save_path("no-save");
+        fs::write(&path, [0xA5; 17]).unwrap();
+
+        let save_file = SaveFile::new(path.clone());
+        let mut gba = Gba::new();
+        gba.load_rom(b"no recognized save signature").unwrap();
+
+        assert_eq!(gba.cartridge_save_type(), CartridgeSaveType::None);
+        assert!(!save_file.load(&mut gba).unwrap());
+        gba.bus_mut().write8(SAVE_BASE, 0x5A);
+        assert_eq!(gba.bus().read8(SAVE_BASE), 0xFF);
+        assert!(!save_file.flush_if_dirty(&mut gba).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), [0xA5; 17]);
 
         fs::remove_file(path).unwrap();
     }

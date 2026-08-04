@@ -15,9 +15,10 @@
 > and Thumb execution, banked CPU modes, exceptions/IRQ, timers, DMA, PPU
 > timing, video modes 0/1/2/3/4, objects, blending, WIN0/WIN1 and OBJ-window
 > masking, keypad/HALT, and SDL output.
-> Cartridge save selection by ROM signature, 128 KiB Flash 1M command
-> emulation, and serial EEPROM over DMA3 are also implemented. SRAM, Flash 1M,
-> and EEPROM data persist to host `.sav` files.
+> Cartridge save selection by ROM signature, 32 KiB SRAM, 64 KiB Flash 512,
+> 128 KiB Flash 1M command emulation, and serial EEPROM over DMA3 are also
+> implemented. SRAM, both Flash sizes, and EEPROM persist to host `.sav` files;
+> ROMs without a recognized signature expose no save hardware.
 > Direct Sound FIFO A/B, timer-driven sample consumption, DMA1/2 Special
 > refills, stereo mixing, and SDL PCM output are implemented as Audio v1.
 > Cartridge v2 adds Game Pak GPIO registers and an S3511-compatible RTC for
@@ -117,12 +118,14 @@ cargo run --release -- --bios firmware/gba_bios.bin --rom roms/test.gba \
   --save saves/emerald.sav
 ```
 
-Existing save files must exactly match a supported backend size: 64 KiB SRAM,
-128 KiB Flash 1M, or 512 B/8 KiB EEPROM. A new EEPROM's capacity is inferred
-from its first recognized DMA3 command length. Dirty saves are flushed every
-five emulated seconds and again when the frontend exits. Writes use a temporary
-file; Windows keeps the previous valid save recoverable until the replacement
-is installed.
+Existing save files must match a supported backend size: 32 KiB SRAM, 64 KiB
+Flash 512, 128 KiB Flash 1M, or 512 B/8 KiB EEPROM. Legacy 64 KiB SRAM files
+created by earlier emulator versions are accepted; the first 32 KiB is retained
+and the file is normalized on the next persistent write. A new EEPROM's
+capacity is inferred from its first recognized DMA3 command length. Dirty saves
+are flushed every five emulated seconds and again when the frontend exits.
+Writes use a temporary file; Windows keeps the previous valid save recoverable
+until the replacement is installed.
 
 ## Audio v1
 
@@ -288,7 +291,7 @@ It does not yet parse detailed operands or execute instructions.
 | Game Pak ROM | `0x08000000-0x0DFFFFFF` | Up to 32 MiB |
 | Game Pak GPIO | `0x080000C4-0x080000C9` | 4-bit cartridge port, mirrored with ROM windows |
 | EEPROM serial I/O | `0x0D000000-0x0DFFFFFF` | 512 B or 8 KiB through DMA3; window narrows for ROMs over 16 MiB |
-| Cartridge save | `0x0E000000-0x0EFFFFFF` | 64 KiB SRAM or banked 128 KiB Flash 1M |
+| Cartridge save | `0x0E000000-0x0EFFFFFF` | 32 KiB SRAM, 64 KiB Flash 512, or banked 128 KiB Flash 1M |
 
 Current bus behavior:
 
@@ -310,12 +313,16 @@ Current bus behavior:
   transferred most-significant bit first as required by `SIIRTC_V001`, while
   data bytes are transferred least-significant bit first. GPIO protocol state
   is reset by a machine reset while the battery-backed RTC control byte survives.
-- `FLASH1M_V` ROM signatures select a banked 128 KiB Flash backend with ID,
-  byte-program, sector/chip erase, and bank-select commands.
+- `FLASH_V` and `FLASH512_V` signatures select 64 KiB Flash 512; `FLASH1M_V`
+  selects banked 128 KiB Flash 1M. Both implement device ID, byte-program, and
+  sector/chip erase commands; bank selection applies only to Flash 1M.
+- `SRAM_V` and `SRAM_F_V` signatures select a 32 KiB SRAM backend.
 - `EEPROM_V` ROM signatures select a serial EEPROM backend. DMA3 transfer
   lengths distinguish 512 B and 8 KiB devices; 64-bit data blocks are sent and
   received most-significant bit first.
-- Unknown save signatures currently fall back to 64 KiB SRAM.
+- ROMs without a recognized save signature expose no save hardware: reads from
+  the save window return `0xFF`, writes are ignored, and no `.sav` is loaded or
+  created.
 - Non-volatile cartridge data survives reset and is loaded from/flushed to a
   host `.sav` file. Only persistent byte changes mark the save dirty; Flash
   command and bank-selection writes alone do not trigger disk writes.
@@ -732,7 +739,8 @@ The emulator does not yet model:
   size-detection sequences.
 - Non-RTC Game Pak GPIO devices, RTC alarm/IRQ behavior, and persisted RTC
   offset metadata independent of the host clock.
-- Complete cartridge hardware detection beyond SRAM and `FLASH1M_V`.
+- Cartridge-database overrides and runtime detection for unusual, unlicensed,
+  or incorrectly tagged ROMs.
 - Dynamic recompilation.
 
 These limitations are intentional at the current milestone.

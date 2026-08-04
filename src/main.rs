@@ -76,12 +76,16 @@ fn run() -> Result<()> {
         .map(|path| SaveFile::new(path.clone()))
         .unwrap_or_else(|| SaveFile::for_rom(&config.rom_path));
 
-    println!(
-        "Save: {} ({} bytes, {})",
-        save_file.path().display(),
-        gba.cartridge_save_type().size(),
-        gba.cartridge_save_type().name()
-    );
+    if gba.cartridge_save_type() == crate::bus::CartridgeSaveType::None {
+        println!("Save: none ({})", gba.cartridge_save_type().name());
+    } else {
+        println!(
+            "Save: {} ({} bytes, {})",
+            save_file.path().display(),
+            gba.cartridge_save_type().size(),
+            gba.cartridge_save_type().name()
+        );
+    }
 
     if gba.cartridge_has_rtc() {
         println!("RTC:  S3511 (host local clock)");
