@@ -6,6 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 
 use sdl3::{
+    audio::{AudioFormat, AudioSpec},
     event::Event,
     keyboard::Keycode,
     pixels::{Color, PixelFormat},
@@ -13,7 +14,7 @@ use sdl3::{
 };
 
 use crate::{
-    bus::{Bus, Key, SCREEN_HEIGHT, SCREEN_WIDTH},
+    bus::{AUDIO_OUTPUT_RATE, Bus, Key, SCREEN_HEIGHT, SCREEN_WIDTH},
     gba::Gba,
     save_file::SaveFile,
 };
@@ -114,6 +115,36 @@ fn process_events(
 pub fn run(gba: &mut Gba, save_file: &SaveFile) -> Result<()> {
     let sdl = sdl3::init().context("failed to initialize SDL3")?;
 
+    let audio_spec = AudioSpec {
+        freq: Some(AUDIO_OUTPUT_RATE as i32),
+        channels: Some(2),
+        format: Some(AudioFormat::S16LE),
+    };
+
+    let audio_stream = match sdl.audio() {
+        Ok(audio_subsystem) => match audio_subsystem
+            .open_playback_device(&audio_spec)
+            .and_then(|device| device.open_device_stream(Some(&audio_spec)))
+        {
+            Ok(stream) => {
+                stream
+                    .resume()
+                    .context("failed to start SDL3 audio playback")?;
+                Some(stream)
+            }
+            Err(error) => {
+                eprintln!("warning: audio output disabled: {error}");
+                None
+            }
+        },
+        Err(error) => {
+            eprintln!("warning: SDL3 audio subsystem unavailable: {error}");
+            None
+        }
+    };
+
+    gba.set_audio_output_enabled(audio_stream.is_some());
+
     let video_subsystem = sdl
         .video()
         .context("failed to initialize SDL3 video subsystem")?;
@@ -168,6 +199,7 @@ pub fn run(gba: &mut Gba, save_file: &SaveFile) -> Result<()> {
      * of performing an unsafe slice cast.
      */
     let mut texture_pixels = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * size_of::<u32>()];
+    let mut audio_samples = Vec::with_capacity(AUDIO_OUTPUT_RATE as usize / 30 * 2);
 
     let mut paused = false;
     let mut title_paused = false;
@@ -205,6 +237,14 @@ pub fn run(gba: &mut Gba, save_file: &SaveFile) -> Result<()> {
             speed_sample_started = Instant::now();
             speed_sample_cycles = gba.elapsed_cycles();
             speed_sample_frames = gba.frame_number();
+
+            if let Some(stream) = &audio_stream {
+                if paused {
+                    stream.pause().context("failed to pause SDL3 audio")?;
+                } else {
+                    stream.resume().context("failed to resume SDL3 audio")?;
+                }
+            }
         }
 
         if paused {
@@ -290,6 +330,17 @@ pub fn run(gba: &mut Gba, save_file: &SaveFile) -> Result<()> {
         canvas.copy(&texture, None, None)?;
 
         canvas.present();
+
+        if let Some(stream) = &audio_stream {
+            audio_samples.clear();
+            gba.drain_audio_samples(&mut audio_samples);
+
+            if !audio_samples.is_empty() {
+                stream
+                    .put_data_i16(&audio_samples)
+                    .context("failed to queue SDL3 audio samples")?;
+            }
+        }
 
         let sample_elapsed = speed_sample_started.elapsed();
 

@@ -1,7 +1,7 @@
 use super::{
-    DmaChannelIndex, DmaController, DmaStartTiming, InterruptController, InterruptSource, Key,
-    Keypad, KeypadUpdateResult, PowerControl, PowerStateRequest, Ppu, PpuTickResult,
-    TimerController, TimerIndex, Video, WaitControl,
+    Audio, DirectSoundFifo, DmaChannelIndex, DmaController, DmaStartTiming, InterruptController,
+    InterruptSource, Key, Keypad, KeypadUpdateResult, PowerControl, PowerStateRequest, Ppu,
+    PpuTickResult, TimerController, TimerIndex, Video, WaitControl,
 };
 
 #[derive(Debug, Clone)]
@@ -15,11 +15,20 @@ pub struct IoRegisters {
     keypad: Keypad,
     power: PowerControl,
     wait_control: WaitControl,
+    audio: Audio,
 }
 
 impl IoRegisters {
     pub const BASE: u32 = 0x0400_0000;
     pub const SIZE: usize = 0x400;
+
+    pub const SOUNDCNT_H_OFFSET: u32 = 0x0082;
+    pub const SOUNDCNT_X_OFFSET: u32 = 0x0084;
+    pub const SOUNDBIAS_OFFSET: u32 = 0x0088;
+    pub const FIFO_A_OFFSET: u32 = 0x00A0;
+    pub const FIFO_A_HIGH_OFFSET: u32 = 0x00A2;
+    pub const FIFO_B_OFFSET: u32 = 0x00A4;
+    pub const FIFO_B_HIGH_OFFSET: u32 = 0x00A6;
 
     pub const TM0CNT_L_OFFSET: u32 = 0x0100;
     pub const TM0CNT_H_OFFSET: u32 = 0x0102;
@@ -123,6 +132,7 @@ impl IoRegisters {
             keypad: Keypad::new(),
             power: PowerControl::new(),
             wait_control: WaitControl::new(),
+            audio: Audio::new(),
         }
     }
 
@@ -220,6 +230,14 @@ impl IoRegisters {
         &mut self.wait_control
     }
 
+    pub const fn audio(&self) -> &Audio {
+        &self.audio
+    }
+
+    pub fn audio_mut(&mut self) -> &mut Audio {
+        &mut self.audio
+    }
+
     pub fn tick(&mut self, cycles: u32) -> PpuTickResult {
         let ppu_result = self.ppu.tick(cycles);
 
@@ -237,10 +255,23 @@ impl IoRegisters {
             self.interrupts.request_mask(ppu_result.interrupt_requests);
         }
 
-        let timer_interrupts = self.timers.tick(cycles);
+        let timer_result = self.timers.tick(cycles);
 
-        if timer_interrupts != 0 {
-            self.interrupts.request_mask(timer_interrupts);
+        if timer_result.interrupt_requests != 0 {
+            self.interrupts
+                .request_mask(timer_result.interrupt_requests);
+        }
+
+        let audio_result = self.audio.tick(cycles, timer_result.overflows);
+
+        if audio_result.fifo_dma_requests[DirectSoundFifo::A.as_usize()] {
+            self.dma
+                .trigger_sound_fifo(Self::BASE + Self::FIFO_A_OFFSET);
+        }
+
+        if audio_result.fifo_dma_requests[DirectSoundFifo::B.as_usize()] {
+            self.dma
+                .trigger_sound_fifo(Self::BASE + Self::FIFO_B_OFFSET);
         }
 
         ppu_result
@@ -265,9 +296,16 @@ impl IoRegisters {
         self.keypad.reset();
         self.power.reset();
         self.wait_control.reset();
+        self.audio = Audio::new();
     }
 
     pub fn read8(&self, offset: u32) -> u8 {
+        if (Self::FIFO_A_OFFSET..Self::FIFO_A_OFFSET + 4).contains(&offset)
+            || (Self::FIFO_B_OFFSET..Self::FIFO_B_OFFSET + 4).contains(&offset)
+        {
+            return 0;
+        }
+
         if offset == Self::POSTFLG_OFFSET {
             return self.power.post_boot_flag();
         }
@@ -323,6 +361,9 @@ impl IoRegisters {
                 | Self::WIN1V_OFFSET
                 | Self::WININ_OFFSET
                 | Self::WINOUT_OFFSET
+                | Self::SOUNDCNT_H_OFFSET
+                | Self::SOUNDCNT_X_OFFSET
+                | Self::SOUNDBIAS_OFFSET
                 | Self::KEYINPUT_OFFSET
                 | Self::KEYCNT_OFFSET
                 | Self::IE_OFFSET
@@ -345,6 +386,16 @@ impl IoRegisters {
     }
 
     pub fn write8(&mut self, offset: u32, value: u8) {
+        if (Self::FIFO_A_OFFSET..Self::FIFO_A_OFFSET + 4).contains(&offset) {
+            self.audio.write_fifo8(DirectSoundFifo::A, value);
+            return;
+        }
+
+        if (Self::FIFO_B_OFFSET..Self::FIFO_B_OFFSET + 4).contains(&offset) {
+            self.audio.write_fifo8(DirectSoundFifo::B, value);
+            return;
+        }
+
         if offset == Self::POSTFLG_OFFSET {
             self.power.write_post_boot_flag(value);
 
@@ -359,6 +410,16 @@ impl IoRegisters {
 
         let aligned = offset & !1;
         let high_byte = offset & 1 != 0;
+
+        if matches!(
+            aligned,
+            Self::SOUNDCNT_H_OFFSET | Self::SOUNDCNT_X_OFFSET | Self::SOUNDBIAS_OFFSET
+        ) {
+            let current = self.read16(aligned);
+            let updated = replace_byte(current, high_byte, value);
+            self.write16(aligned, updated);
+            return;
+        }
 
         if aligned == Self::DISPCNT_OFFSET {
             if high_byte {
@@ -507,6 +568,12 @@ impl IoRegisters {
         let offset = offset & !1;
 
         match offset {
+            Self::SOUNDCNT_H_OFFSET => return self.audio.read_sound_control_high(),
+            Self::SOUNDCNT_X_OFFSET => return self.audio.read_sound_control_x(),
+            Self::SOUNDBIAS_OFFSET => return self.audio.read_sound_bias(),
+            Self::FIFO_A_OFFSET | Self::FIFO_A_HIGH_OFFSET => return 0,
+            Self::FIFO_B_OFFSET | Self::FIFO_B_HIGH_OFFSET => return 0,
+
             Self::DISPCNT_OFFSET => {
                 return self.video.read_display_control();
             }
@@ -651,6 +718,27 @@ impl IoRegisters {
         let offset = offset & !1;
 
         match offset {
+            Self::SOUNDCNT_H_OFFSET => {
+                self.audio.write_sound_control_high(value);
+                return;
+            }
+            Self::SOUNDCNT_X_OFFSET => {
+                self.audio.write_sound_control_x(value);
+                return;
+            }
+            Self::SOUNDBIAS_OFFSET => {
+                self.audio.write_sound_bias(value);
+                return;
+            }
+            Self::FIFO_A_OFFSET | Self::FIFO_A_HIGH_OFFSET => {
+                self.audio.write_fifo16(DirectSoundFifo::A, value);
+                return;
+            }
+            Self::FIFO_B_OFFSET | Self::FIFO_B_HIGH_OFFSET => {
+                self.audio.write_fifo16(DirectSoundFifo::B, value);
+                return;
+            }
+
             Self::DISPCNT_OFFSET => {
                 self.video.write_display_control(value);
 
@@ -1120,6 +1208,24 @@ const fn replace_byte(original: u16, high_byte: bool, value: u8) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::IoRegisters;
+    use crate::bus::DirectSoundFifo;
+
+    #[test]
+    fn direct_sound_registers_and_fifo_use_mmio_semantics() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::SOUNDCNT_X_OFFSET, 1 << 7);
+        io.write16(IoRegisters::SOUNDCNT_H_OFFSET, (1 << 2) | (1 << 9));
+        io.write32(IoRegisters::FIFO_A_OFFSET, 0x0403_0201);
+
+        assert_eq!(io.read16(IoRegisters::SOUNDCNT_X_OFFSET), 1 << 7);
+        assert_eq!(
+            io.read16(IoRegisters::SOUNDCNT_H_OFFSET),
+            (1 << 2) | (1 << 9)
+        );
+        assert_eq!(io.read32(IoRegisters::FIFO_A_OFFSET), 0);
+        assert_eq!(io.audio().fifo_level(DirectSoundFifo::A), 4);
+    }
 
     use crate::bus::{
         DmaChannelIndex, DmaTransferWidth, InterruptController, InterruptSource, Key,

@@ -3,6 +3,27 @@ use super::InterruptSource;
 pub const TIMER_COUNT: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimerTickResult {
+    pub interrupt_requests: u16,
+    pub overflows: [u64; TIMER_COUNT],
+}
+
+impl TimerTickResult {
+    pub const fn new() -> Self {
+        Self {
+            interrupt_requests: 0,
+            overflows: [0; TIMER_COUNT],
+        }
+    }
+}
+
+impl Default for TimerTickResult {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerIndex {
     Timer0 = 0,
     Timer1 = 1,
@@ -312,12 +333,12 @@ impl TimerController {
     /// Timer 0 always uses the CPU clock. Timer 1–3 can either use the
     /// CPU clock or increment once for each overflow of the preceding
     /// timer.
-    pub fn tick(&mut self, cycles: u32) -> u16 {
+    pub fn tick(&mut self, cycles: u32) -> TimerTickResult {
         if self.enabled_mask == 0 {
-            return 0;
+            return TimerTickResult::new();
         }
 
-        let mut interrupt_mask = 0u16;
+        let mut result = TimerTickResult::new();
         let mut previous_overflows = 0u64;
         let last_enabled = 7 - self.enabled_mask.leading_zeros() as usize;
 
@@ -337,13 +358,14 @@ impl TimerController {
             };
 
             if overflows > 0 && timer.control().irq_enabled() {
-                interrupt_mask |= timer_index.interrupt_source().mask();
+                result.interrupt_requests |= timer_index.interrupt_source().mask();
             }
 
+            result.overflows[index] = overflows;
             previous_overflows = overflows;
         }
 
-        interrupt_mask
+        result
     }
 
     pub fn reset(&mut self) {
@@ -450,7 +472,11 @@ mod tests {
 
         let requests = timers.tick(1);
 
-        assert_ne!(requests & TimerIndex::Timer0.interrupt_source().mask(), 0);
+        assert_ne!(
+            requests.interrupt_requests & TimerIndex::Timer0.interrupt_source().mask(),
+            0
+        );
+        assert_eq!(requests.overflows[TimerIndex::Timer0.as_usize()], 1);
     }
 
     #[test]

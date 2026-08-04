@@ -1,6 +1,8 @@
 use super::InterruptSource;
 
 pub const DMA_CHANNEL_COUNT: usize = 4;
+const FIFO_A_ADDRESS: u32 = 0x0400_00A0;
+const FIFO_B_ADDRESS: u32 = 0x0400_00A4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaChannelIndex {
@@ -424,12 +426,27 @@ impl DmaController {
             self.pending_mask &= !(1 << channel_number);
         }
 
+        let sound_fifo_dma = matches!(channel_index, DmaChannelIndex::Dma1 | DmaChannelIndex::Dma2)
+            && channel.control.start_timing() == DmaStartTiming::Special
+            && matches!(
+                channel.internal_destination,
+                FIFO_A_ADDRESS | FIFO_B_ADDRESS
+            );
+
         Some(DmaTransferRequest {
             channel: channel_index,
             source: channel.internal_source,
             destination: channel.internal_destination,
-            count: channel.internal_count,
-            width: channel.control.transfer_width(),
+            count: if sound_fifo_dma {
+                4
+            } else {
+                channel.internal_count
+            },
+            width: if sound_fifo_dma {
+                DmaTransferWidth::Word
+            } else {
+                channel.control.transfer_width()
+            },
 
             source_control: match channel.control.source_control() {
                 /*
@@ -441,7 +458,11 @@ impl DmaController {
                 control => control,
             },
 
-            destination_control: channel.control.destination_control(),
+            destination_control: if sound_fifo_dma {
+                DmaAddressControl::Fixed
+            } else {
+                channel.control.destination_control()
+            },
 
             irq_enabled: channel.control.irq_enabled(),
 
@@ -512,6 +533,27 @@ impl DmaController {
         }
     }
 
+    pub fn trigger_sound_fifo(&mut self, destination: u32) {
+        if !matches!(destination, FIFO_A_ADDRESS | FIFO_B_ADDRESS) {
+            return;
+        }
+
+        for channel_index in [DmaChannelIndex::Dma1, DmaChannelIndex::Dma2] {
+            let channel_number = channel_index.as_usize();
+            let channel = &mut self.channels[channel_number];
+
+            if !channel.control.enabled()
+                || channel.control.start_timing() != DmaStartTiming::Special
+                || channel.internal_destination != destination
+            {
+                continue;
+            }
+
+            channel.pending_count = channel.pending_count.saturating_add(1);
+            self.pending_mask |= 1 << channel_number;
+        }
+    }
+
     pub fn reset(&mut self) {
         for channel in &mut self.channels {
             channel.reset();
@@ -530,8 +572,27 @@ impl Default for DmaController {
 mod tests {
     use super::{
         DmaAddressControl, DmaChannelIndex, DmaController, DmaStartTiming, DmaTransferCompletion,
-        DmaTransferWidth,
+        DmaTransferWidth, FIFO_A_ADDRESS,
     };
+
+    #[test]
+    fn sound_fifo_dma_is_forced_to_four_fixed_words() {
+        let mut dma = DmaController::new();
+
+        dma.write_source(DmaChannelIndex::Dma1, 0x0200_0000);
+        dma.write_destination(DmaChannelIndex::Dma1, FIFO_A_ADDRESS);
+        dma.write_count(DmaChannelIndex::Dma1, 99);
+        dma.write_control(DmaChannelIndex::Dma1, (1 << 9) | (0b11 << 12) | (1 << 15));
+
+        dma.trigger_sound_fifo(FIFO_A_ADDRESS);
+        let request = dma
+            .next_pending_request()
+            .expect("sound DMA must be pending");
+
+        assert_eq!(request.count, 4);
+        assert_eq!(request.width, DmaTransferWidth::Word);
+        assert_eq!(request.destination_control, DmaAddressControl::Fixed);
+    }
 
     #[test]
     fn control_fields_are_decoded() {

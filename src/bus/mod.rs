@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
+mod audio;
 mod cartridge_save;
 mod dma;
 mod interrupt;
@@ -17,6 +18,8 @@ pub use self::dma::{
     DMA_CHANNEL_COUNT, DmaAddressControl, DmaChannel, DmaChannelIndex, DmaControl, DmaController,
     DmaStartTiming, DmaTransferCompletion, DmaTransferRequest, DmaTransferWidth,
 };
+
+pub use self::audio::{AUDIO_OUTPUT_RATE, Audio, DirectSoundFifo};
 
 pub use self::interrupt::{InterruptController, InterruptSource};
 
@@ -125,6 +128,12 @@ pub struct Bus {
 }
 
 impl Bus {
+    pub const REG_SOUNDCNT_H: u32 = IoRegisters::BASE + IoRegisters::SOUNDCNT_H_OFFSET;
+    pub const REG_SOUNDCNT_X: u32 = IoRegisters::BASE + IoRegisters::SOUNDCNT_X_OFFSET;
+    pub const REG_SOUNDBIAS: u32 = IoRegisters::BASE + IoRegisters::SOUNDBIAS_OFFSET;
+    pub const REG_FIFO_A: u32 = IoRegisters::BASE + IoRegisters::FIFO_A_OFFSET;
+    pub const REG_FIFO_B: u32 = IoRegisters::BASE + IoRegisters::FIFO_B_OFFSET;
+
     pub const REG_TM0CNT_L: u32 = IoRegisters::BASE + IoRegisters::TM0CNT_L_OFFSET;
 
     pub const REG_TM0CNT_H: u32 = IoRegisters::BASE + IoRegisters::TM0CNT_H_OFFSET;
@@ -390,6 +399,14 @@ impl Bus {
 
     pub fn take_frame_ready(&mut self) -> bool {
         self.io.video_mut().take_frame_ready()
+    }
+
+    pub fn set_audio_output_enabled(&mut self, enabled: bool) {
+        self.io.audio_mut().set_output_enabled(enabled);
+    }
+
+    pub fn drain_audio_samples(&mut self, destination: &mut Vec<i16>) {
+        self.io.audio_mut().drain_output_samples(destination);
     }
 
     pub const fn frame_number(&self) -> u64 {
@@ -1027,9 +1044,36 @@ fn advance_dma_address(address: u32, width: u32, control: DmaAddressControl) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        AccessKind, Bus, BusLoadError, CartridgeSaveType, DmaChannelIndex, InterruptController,
-        InterruptSource, Ppu, SCREEN_WIDTH,
+        AccessKind, Bus, BusLoadError, CartridgeSaveType, DirectSoundFifo, DmaChannelIndex,
+        InterruptController, InterruptSource, Ppu, SCREEN_WIDTH,
     };
+
+    #[test]
+    fn timer_overflow_requests_and_runs_sound_fifo_dma() {
+        let mut bus = Bus::new();
+        let source = 0x0200_0100;
+
+        for index in 0..4 {
+            bus.write32(source + index * 4, 0x0403_0201 + index);
+        }
+
+        bus.write32(Bus::REG_DMA1SAD, source);
+        bus.write32(Bus::REG_DMA1DAD, Bus::REG_FIFO_A);
+        bus.write16(Bus::REG_DMA1CNT_L, 99);
+        bus.write16(Bus::REG_DMA1CNT_H, (1 << 9) | (0b11 << 12) | (1 << 15));
+        bus.write16(Bus::REG_TM0CNT_L, 0xFFFF);
+        bus.write16(Bus::REG_TM0CNT_H, 1 << 7);
+        bus.write16(Bus::REG_SOUNDCNT_X, 1 << 7);
+
+        bus.tick(1);
+
+        let result = bus
+            .run_pending_dma()
+            .expect("half-empty FIFO must request DMA1");
+
+        assert_eq!(result.transferred_units, 4);
+        assert_eq!(bus.io().audio().fifo_level(DirectSoundFifo::A), 16);
+    }
 
     fn append_serial_bits(bits: &mut Vec<bool>, value: usize, count: usize) {
         for shift in (0..count).rev() {

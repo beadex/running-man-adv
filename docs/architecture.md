@@ -18,6 +18,8 @@
 > Cartridge save selection by ROM signature, 128 KiB Flash 1M command
 > emulation, and serial EEPROM over DMA3 are also implemented. SRAM, Flash 1M,
 > and EEPROM data persist to host `.sav` files.
+> Direct Sound FIFO A/B, timer-driven sample consumption, DMA1/2 Special
+> refills, stereo mixing, and SDL PCM output are implemented as Audio v1.
 > Keep this note until the full architecture document is rewritten.
 
 ## Headless validation
@@ -120,6 +122,21 @@ five emulated seconds and again when the frontend exits. Writes use a temporary
 file; Windows keeps the previous valid save recoverable until the replacement
 is installed.
 
+## Audio v1
+
+Direct Sound currently models `SOUNDCNT_H`, `SOUNDCNT_X`, `SOUNDBIAS`, and the
+32-byte FIFO A/B ports. Timer 0 or Timer 1 overflows consume signed 8-bit FIFO
+samples. A half-empty FIFO requests DMA1/2 Special timing; sound DMA transfers
+are forced to four fixed-destination words as on GBA hardware.
+
+The SDL frontend enables a 48 kHz signed-16-bit stereo stream and drains PCM
+from the emulator core once per video frame. Headless runs leave host PCM
+generation disabled while retaining FIFO, timer, and DMA behavior. Audio output
+failure is non-fatal so video-only emulation remains available.
+
+PSG channels 1-4, analog filtering, exact DAC bias/resolution behavior, and
+cycle-exact resampling remain outside Audio v1.
+
 ---
 
 # 1. Development Strategy
@@ -159,6 +176,7 @@ src/
 ├── loader.rs
 ├── bus/
 │   ├── mod.rs
+│   ├── audio.rs
 │   └── memory.rs
 └── cpu/
     ├── mod.rs
@@ -696,7 +714,7 @@ The emulator does not yet model:
 - DMA.
 - Timers.
 - PPU.
-- Audio.
+- PSG channels 1-4 and cycle-exact audio mixing/resampling.
 - Exact EEPROM write-busy timing and cartridge-database overrides for unusual
   size-detection sequences.
 - Game Pak GPIO.

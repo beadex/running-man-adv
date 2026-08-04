@@ -127,6 +127,14 @@ impl Gba {
         self.bus.take_frame_ready()
     }
 
+    pub fn set_audio_output_enabled(&mut self, enabled: bool) {
+        self.bus.set_audio_output_enabled(enabled);
+    }
+
+    pub fn drain_audio_samples(&mut self, destination: &mut Vec<i16>) {
+        self.bus.drain_audio_samples(destination);
+    }
+
     pub const fn frame_number(&self) -> u64 {
         self.bus.frame_number()
     }
