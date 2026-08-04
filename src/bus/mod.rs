@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 
 mod audio;
+mod cartridge_gpio;
 mod cartridge_save;
 mod dma;
 mod interrupt;
@@ -43,6 +44,9 @@ pub use self::waitstate::{AccessKind, AccessWidth, MemoryRegion, TimedAccess, Wa
 
 pub use self::cartridge_save::{CartridgeSaveLoadError, CartridgeSaveType};
 
+pub use self::cartridge_gpio::RtcDateTime;
+
+use self::cartridge_gpio::GamePakGpio;
 use self::cartridge_save::CartridgeSave;
 use self::memory::{read_u16_le, read_u32_le, write_u16_le, write_u32_le};
 
@@ -124,6 +128,7 @@ pub struct Bus {
     oam: Box<[u8; OAM_SIZE]>,
 
     rom: Vec<u8>,
+    cartridge_gpio: GamePakGpio,
     cartridge_save: CartridgeSave,
 }
 
@@ -259,6 +264,8 @@ impl Bus {
 
             rom: Vec::new(),
 
+            cartridge_gpio: GamePakGpio::default(),
+
             cartridge_save: CartridgeSave::default(),
         }
     }
@@ -270,6 +277,7 @@ impl Bus {
         self.palette.fill(0);
         self.vram.fill(0);
         self.oam.fill(0);
+        self.cartridge_gpio.reset_protocol();
         self.cartridge_save.reset_protocol();
 
         /*
@@ -310,6 +318,7 @@ impl Bus {
 
         self.rom.clear();
         self.rom.extend_from_slice(rom);
+        self.cartridge_gpio = GamePakGpio::from_rom(rom);
         self.cartridge_save = CartridgeSave::from_rom(rom);
 
         Ok(())
@@ -317,6 +326,10 @@ impl Bus {
 
     pub const fn cartridge_save_type(&self) -> CartridgeSaveType {
         self.cartridge_save.save_type()
+    }
+
+    pub const fn cartridge_has_rtc(&self) -> bool {
+        self.cartridge_gpio.has_device()
     }
 
     pub fn cartridge_save_data(&self) -> &[u8] {
@@ -333,6 +346,11 @@ impl Bus {
 
     pub fn mark_cartridge_save_clean(&mut self) {
         self.cartridge_save.mark_clean();
+    }
+
+    #[cfg(test)]
+    pub fn set_fixed_rtc_datetime(&mut self, datetime: RtcDateTime) {
+        self.cartridge_gpio.set_fixed_rtc_datetime(datetime);
     }
 
     pub const fn io(&self) -> &IoRegisters {
@@ -462,7 +480,7 @@ impl Bus {
                 self.oam[offset]
             }
 
-            ROM_BASE..=ROM_END => self.read_rom8(address),
+            ROM_BASE..=ROM_END => self.read_rom_or_gpio8(address),
 
             0x0E00_0000..=0x0EFF_FFFF => {
                 let offset = mirror_offset(address, SAVE_BASE, SAVE_WINDOW_SIZE);
@@ -558,6 +576,12 @@ impl Bus {
     pub fn read16(&self, address: u32) -> u16 {
         let aligned = address & !1;
 
+        if (ROM_BASE..=ROM_END).contains(&aligned)
+            && let Some(value) = self.cartridge_gpio.read16(physical_rom_offset(aligned))
+        {
+            return value;
+        }
+
         if self.is_eeprom_access(aligned) {
             /* Direct CPU reads do not clock an EEPROM DMA transaction. */
             return 1;
@@ -618,6 +642,14 @@ impl Bus {
 
     pub fn write16(&mut self, address: u32, value: u16) {
         let aligned = address & !1;
+
+        if (ROM_BASE..=ROM_END).contains(&aligned)
+            && self
+                .cartridge_gpio
+                .write16(physical_rom_offset(aligned), value)
+        {
+            return;
+        }
 
         if self.is_eeprom_access(aligned) {
             self.cartridge_save.write_eeprom_bit(value & 1 != 0);
@@ -693,6 +725,10 @@ impl Bus {
     pub fn read32(&self, address: u32) -> u32 {
         let aligned = address & !3;
 
+        if is_gpio_word_address(aligned) {
+            return u32::from(self.read16(aligned)) | (u32::from(self.read16(aligned + 2)) << 16);
+        }
+
         if IoRegisters::contains_address(aligned) {
             let offset = IoRegisters::address_to_offset(aligned);
 
@@ -753,6 +789,12 @@ impl Bus {
 
     pub fn write32(&mut self, address: u32, value: u32) {
         let aligned = address & !3;
+
+        if is_gpio_word_address(aligned) {
+            self.write16(aligned, value as u16);
+            self.write16(aligned + 2, (value >> 16) as u16);
+            return;
+        }
 
         if IoRegisters::contains_address(aligned) {
             let offset = IoRegisters::address_to_offset(aligned);
@@ -823,6 +865,17 @@ impl Bus {
         let offset = ((address - ROM_BASE) & 0x01FF_FFFF) as usize;
 
         self.rom.get(offset).copied().unwrap_or(0)
+    }
+
+    fn read_rom_or_gpio8(&self, address: u32) -> u8 {
+        let physical_offset = physical_rom_offset(address);
+        let register_offset = physical_offset & !1;
+
+        if let Some(value) = self.cartridge_gpio.read16(register_offset) {
+            return value.to_le_bytes()[(physical_offset & 1) as usize];
+        }
+
+        self.read_rom8(address)
     }
 
     fn is_eeprom_access(&self, address: u32) -> bool {
@@ -1005,6 +1058,15 @@ fn mirror_offset(address: u32, base: u32, size: usize) -> usize {
     ((address - base) as usize) % size
 }
 
+fn physical_rom_offset(address: u32) -> u32 {
+    address.wrapping_sub(ROM_BASE) & 0x01FF_FFFF
+}
+
+fn is_gpio_word_address(address: u32) -> bool {
+    (ROM_BASE..=ROM_END).contains(&address)
+        && matches!(physical_rom_offset(address), 0x0000_00C4 | 0x0000_00C8)
+}
+
 fn vram_offset(address: u32) -> usize {
     /*
      * GBA VRAM is 96 KiB.
@@ -1045,8 +1107,208 @@ fn advance_dma_address(address: u32, width: u32, control: DmaAddressControl) -> 
 mod tests {
     use super::{
         AccessKind, Bus, BusLoadError, CartridgeSaveType, DirectSoundFifo, DmaChannelIndex,
-        InterruptController, InterruptSource, Ppu, SCREEN_WIDTH,
+        InterruptController, InterruptSource, Ppu, RtcDateTime, SCREEN_WIDTH,
     };
+
+    const GPIO_DATA: u32 = 0x0800_00C4;
+    const GPIO_DIRECTION: u32 = 0x0800_00C6;
+    const GPIO_CONTROL: u32 = 0x0800_00C8;
+
+    fn begin_rtc_transfer(bus: &mut Bus) {
+        bus.write16(GPIO_DIRECTION, 0b111);
+        bus.write16(GPIO_DATA, 0b001);
+        bus.write16(GPIO_DATA, 0b101);
+    }
+
+    fn write_rtc_command(bus: &mut Bus, value: u8) {
+        for bit in (0..8).rev() {
+            let pins = 0b100 | (((value >> bit) & 1) << 1);
+            bus.write16(GPIO_DATA, pins as u16);
+            bus.write16(GPIO_DATA, (pins | 1) as u16);
+        }
+    }
+
+    fn write_rtc_data_byte(bus: &mut Bus, value: u8) {
+        for bit in 0..8 {
+            let pins = 0b100 | (((value >> bit) & 1) << 1);
+            bus.write16(GPIO_DATA, pins as u16);
+            bus.write16(GPIO_DATA, (pins | 1) as u16);
+        }
+    }
+
+    fn read_rtc_byte(bus: &mut Bus) -> u8 {
+        let mut value = 0;
+
+        for bit in 0..8 {
+            bus.write16(GPIO_DATA, 0b100);
+            bus.write16(GPIO_DATA, 0b101);
+            value |= ((bus.read16(GPIO_DATA) as u8 >> 1) & 1) << bit;
+        }
+
+        value
+    }
+
+    fn end_rtc_transfer(bus: &mut Bus) {
+        bus.write16(GPIO_DATA, 0b001);
+    }
+
+    #[test]
+    fn rtc_gpio_registers_are_gated_and_mirrored() {
+        let mut rom = vec![0; 0x200];
+        rom[..11].copy_from_slice(b"SIIRTC_V001");
+        rom[0xC4..0xCA].copy_from_slice(&[0x34, 0x12, 0x78, 0x56, 0xBC, 0x9A]);
+
+        let mut bus = Bus::new();
+        bus.load_rom(&rom).unwrap();
+
+        assert_eq!(bus.read16(GPIO_DATA), 0x1234);
+        bus.write16(GPIO_DIRECTION, 0b111);
+        bus.write16(GPIO_DATA, 0b101);
+        assert_eq!(bus.read16(GPIO_DATA), 0x1234);
+
+        bus.write16(GPIO_CONTROL, 1);
+        assert_eq!(bus.read16(GPIO_DATA), 0b101);
+        assert_eq!(bus.read16(GPIO_DIRECTION), 0b111);
+        assert_eq!(bus.read16(GPIO_CONTROL), 1);
+        assert_eq!(bus.read16(0x0A00_00C4), 0b101);
+        assert_eq!(bus.read16(0x0C00_00C6), 0b111);
+    }
+
+    #[test]
+    fn rtc_serial_datetime_read_returns_fixed_bcd_clock() {
+        let mut bus = Bus::new();
+        bus.load_rom(b"SIIRTC_V001").unwrap();
+        bus.set_fixed_rtc_datetime(RtcDateTime {
+            year: 2024,
+            month: 2,
+            day: 29,
+            weekday: 4,
+            hour: 23,
+            minute: 59,
+            second: 58,
+        });
+        bus.write16(GPIO_CONTROL, 1);
+
+        begin_rtc_transfer(&mut bus);
+        write_rtc_command(&mut bus, 0x65);
+        bus.write16(GPIO_DIRECTION, 0b101);
+
+        let datetime = std::array::from_fn::<_, 7, _>(|_| read_rtc_byte(&mut bus));
+        end_rtc_transfer(&mut bus);
+
+        assert_eq!(datetime, [0x24, 0x02, 0x29, 0x04, 0x23, 0x59, 0x58]);
+    }
+
+    #[test]
+    fn rtc_control_register_can_be_written_read_and_reset() {
+        let mut bus = Bus::new();
+        bus.load_rom(b"SIIRTC_V001").unwrap();
+        bus.write16(GPIO_CONTROL, 1);
+
+        begin_rtc_transfer(&mut bus);
+        write_rtc_command(&mut bus, 0x62);
+        write_rtc_data_byte(&mut bus, 0x40);
+        end_rtc_transfer(&mut bus);
+
+        begin_rtc_transfer(&mut bus);
+        write_rtc_command(&mut bus, 0x63);
+        bus.write16(GPIO_DIRECTION, 0b101);
+        assert_eq!(read_rtc_byte(&mut bus), 0x40);
+        end_rtc_transfer(&mut bus);
+
+        begin_rtc_transfer(&mut bus);
+        write_rtc_command(&mut bus, 0x60);
+        end_rtc_transfer(&mut bus);
+
+        begin_rtc_transfer(&mut bus);
+        write_rtc_command(&mut bus, 0x63);
+        bus.write16(GPIO_DIRECTION, 0b101);
+        assert_eq!(read_rtc_byte(&mut bus), 0);
+    }
+
+    #[test]
+    fn rtc_time_command_samples_clock_at_each_transaction() {
+        let mut bus = Bus::new();
+        bus.load_rom(b"SIIRTC_V001").unwrap();
+        bus.write16(GPIO_CONTROL, 1);
+        bus.set_fixed_rtc_datetime(RtcDateTime {
+            year: 2024,
+            month: 2,
+            day: 29,
+            weekday: 4,
+            hour: 23,
+            minute: 59,
+            second: 59,
+        });
+
+        begin_rtc_transfer(&mut bus);
+        write_rtc_command(&mut bus, 0x67);
+        bus.write16(GPIO_DIRECTION, 0b101);
+        let before_midnight = std::array::from_fn::<_, 3, _>(|_| read_rtc_byte(&mut bus));
+        end_rtc_transfer(&mut bus);
+
+        bus.set_fixed_rtc_datetime(RtcDateTime {
+            year: 2024,
+            month: 3,
+            day: 1,
+            weekday: 5,
+            hour: 0,
+            minute: 0,
+            second: 0,
+        });
+        begin_rtc_transfer(&mut bus);
+        write_rtc_command(&mut bus, 0x67);
+        bus.write16(GPIO_DIRECTION, 0b101);
+        let after_midnight = std::array::from_fn::<_, 3, _>(|_| read_rtc_byte(&mut bus));
+
+        assert_eq!(before_midnight, [0x23, 0x59, 0x59]);
+        assert_eq!(after_midnight, [0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn bus_reset_resets_gpio_protocol_but_preserves_rtc_control() {
+        let mut bus = Bus::new();
+        bus.load_rom(b"SIIRTC_V001").unwrap();
+        bus.write16(GPIO_CONTROL, 1);
+
+        begin_rtc_transfer(&mut bus);
+        write_rtc_command(&mut bus, 0x62);
+        write_rtc_data_byte(&mut bus, 0x20);
+        end_rtc_transfer(&mut bus);
+
+        bus.reset();
+        bus.write16(GPIO_CONTROL, 1);
+        begin_rtc_transfer(&mut bus);
+        write_rtc_command(&mut bus, 0x63);
+        bus.write16(GPIO_DIRECTION, 0b101);
+
+        assert_eq!(read_rtc_byte(&mut bus), 0x20);
+    }
+
+    #[test]
+    fn cartridge_without_rtc_keeps_rom_data_at_gpio_offsets() {
+        let mut rom = vec![0; 0x200];
+        rom[0xC4..0xCA].copy_from_slice(&[0x34, 0x12, 0x78, 0x56, 0xBC, 0x9A]);
+        let mut bus = Bus::new();
+        bus.load_rom(&rom).unwrap();
+
+        bus.write16(GPIO_CONTROL, 1);
+        bus.write16(GPIO_DIRECTION, 0b111);
+        bus.write16(GPIO_DATA, 0b101);
+
+        assert_eq!(bus.read16(GPIO_DATA), 0x1234);
+        assert_eq!(bus.read16(GPIO_DIRECTION), 0x5678);
+        assert_eq!(bus.read16(GPIO_CONTROL), 0x9ABC);
+    }
+
+    #[test]
+    fn non_cartridge_word_at_gpio_like_offset_stays_in_ram() {
+        let mut bus = Bus::new();
+
+        bus.write32(0x0200_00C4, 0x89AB_CDEF);
+
+        assert_eq!(bus.read32(0x0200_00C4), 0x89AB_CDEF);
+    }
 
     #[test]
     fn timer_overflow_requests_and_runs_sound_fifo_dma() {

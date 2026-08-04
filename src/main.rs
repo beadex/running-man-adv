@@ -83,6 +83,10 @@ fn run() -> Result<()> {
         gba.cartridge_save_type().name()
     );
 
+    if gba.cartridge_has_rtc() {
+        println!("RTC:  S3511 (host local clock)");
+    }
+
     if save_file.load(&mut gba)? {
         println!("Loaded save file: {}", save_file.path().display());
     }

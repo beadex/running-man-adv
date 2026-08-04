@@ -20,6 +20,8 @@
 > and EEPROM data persist to host `.sav` files.
 > Direct Sound FIFO A/B, timer-driven sample consumption, DMA1/2 Special
 > refills, stereo mixing, and SDL PCM output are implemented as Audio v1.
+> Cartridge v2 adds Game Pak GPIO registers and an S3511-compatible RTC for
+> `SIIRTC_V` cartridges, backed by the host's local clock.
 > Keep this note until the full architecture document is rewritten.
 
 ## Headless validation
@@ -177,6 +179,7 @@ src/
 ├── bus/
 │   ├── mod.rs
 │   ├── audio.rs
+│   ├── cartridge_gpio.rs
 │   └── memory.rs
 └── cpu/
     ├── mod.rs
@@ -283,6 +286,7 @@ It does not yet parse detailed operands or execute instructions.
 | VRAM | `0x06000000-0x06FFFFFF` | 96 KiB with special mirroring |
 | OAM | `0x07000000-0x07FFFFFF` | 1 KiB mirrored |
 | Game Pak ROM | `0x08000000-0x0DFFFFFF` | Up to 32 MiB |
+| Game Pak GPIO | `0x080000C4-0x080000C9` | 4-bit cartridge port, mirrored with ROM windows |
 | EEPROM serial I/O | `0x0D000000-0x0DFFFFFF` | 512 B or 8 KiB through DMA3; window narrows for ROMs over 16 MiB |
 | Cartridge save | `0x0E000000-0x0EFFFFFF` | 64 KiB SRAM or banked 128 KiB Flash 1M |
 
@@ -297,6 +301,15 @@ Current bus behavior:
 - OAM byte writes are ignored.
 - OAM halfword and word writes are supported.
 - The three Game Pak ROM windows reference the same ROM image.
+- `SIIRTC_V` ROM signatures enable Game Pak GPIO data, direction, and control
+  registers at physical ROM offsets `0xC4`, `0xC6`, and `0xC8`. When GPIO reads
+  are disabled, the underlying ROM bytes remain visible.
+- The GPIO RTC models the three-wire S3511 command protocol, including reset,
+  control-register read/write, and BCD date/time or time reads. Runtime samples
+  use the host's local clock; tests inject a fixed clock. Command bytes are
+  transferred most-significant bit first as required by `SIIRTC_V001`, while
+  data bytes are transferred least-significant bit first. GPIO protocol state
+  is reset by a machine reset while the battery-backed RTC control byte survives.
 - `FLASH1M_V` ROM signatures select a banked 128 KiB Flash backend with ID,
   byte-program, sector/chip erase, and bank-select commands.
 - `EEPROM_V` ROM signatures select a serial EEPROM backend. DMA3 transfer
@@ -717,7 +730,8 @@ The emulator does not yet model:
 - PSG channels 1-4 and cycle-exact audio mixing/resampling.
 - Exact EEPROM write-busy timing and cartridge-database overrides for unusual
   size-detection sequences.
-- Game Pak GPIO.
+- Non-RTC Game Pak GPIO devices, RTC alarm/IRQ behavior, and persisted RTC
+  offset metadata independent of the host clock.
 - Complete cartridge hardware detection beyond SRAM and `FLASH1M_V`.
 - Dynamic recompilation.
 
