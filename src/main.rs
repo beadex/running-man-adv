@@ -4,11 +4,21 @@ mod frontend;
 mod gba;
 mod loader;
 
-use std::{env, error::Error, ffi::OsString, fmt, path::PathBuf, process::ExitCode};
+use std::{
+    env,
+    error::Error,
+    ffi::OsString,
+    fmt,
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use anyhow::{Context, Result};
 
 use crate::{
+    bus::Key,
     frontend::sdl,
     gba::Gba,
     loader::{load_bios_file, load_rom_file},
@@ -57,17 +67,39 @@ fn run() -> Result<()> {
     gba.cpu_mut().set_strict_faults(config.strict_cpu);
 
     if let Some(cycle_budget) = config.headless_cycles {
-        run_headless(gba, cycle_budget, config.watch_address).context("headless run failed")
+        run_headless(
+            gba,
+            cycle_budget,
+            config.watch_address,
+            config.framebuffer_output.as_deref(),
+            &config.key_presses,
+        )
+        .context("headless run failed")
     } else {
         sdl::run(gba).context("SDL frontend failed")
     }
 }
 
-fn run_headless(mut gba: Gba, cycle_budget: u64, watch_address: Option<u32>) -> Result<()> {
+fn run_headless(
+    mut gba: Gba,
+    cycle_budget: u64,
+    watch_address: Option<u32>,
+    framebuffer_output: Option<&Path>,
+    key_presses: &[KeyPress],
+) -> Result<()> {
     let starting_cycles = gba.elapsed_cycles();
     let mut watch_stats = watch_address.map(|address| WatchStats::new(gba.bus().read32(address)));
+    let mut pressed_keys = u16::MAX;
 
     while gba.elapsed_cycles().wrapping_sub(starting_cycles) < cycle_budget {
+        let elapsed = gba.elapsed_cycles().wrapping_sub(starting_cycles);
+        let scheduled_keys = scheduled_key_mask(key_presses, elapsed);
+
+        if scheduled_keys != pressed_keys {
+            gba.set_pressed_keys(scheduled_keys);
+            pressed_keys = scheduled_keys;
+        }
+
         let cycles = gba.step();
 
         if let (Some(address), Some(stats)) = (watch_address, watch_stats.as_mut()) {
@@ -124,6 +156,16 @@ fn run_headless(mut gba: Gba, cycle_budget: u64, watch_address: Option<u32>) -> 
     );
     println!("  IRQ handler:      0x{:08X}", bus.read32(0x0300_7FFC));
 
+    if let Some(path) = framebuffer_output {
+        let mut file = File::create(path)
+            .with_context(|| format!("failed to create framebuffer output {}", path.display()))?;
+
+        write_framebuffer_ppm(&mut file, gba.framebuffer())
+            .with_context(|| format!("failed to write framebuffer output {}", path.display()))?;
+
+        println!("  framebuffer file: {}", path.display());
+    }
+
     if let (Some(address), Some(stats)) = (watch_address, watch_stats) {
         println!("  [0x{address:08X}]:     0x{:08X}", stats.last);
         println!("  watch changes:    {}", stats.changes);
@@ -143,6 +185,51 @@ fn run_headless(mut gba: Gba, cycle_budget: u64, watch_address: Option<u32>) -> 
             fault.instruction_address,
             fault.detail
         );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyPress {
+    key: Key,
+    start_cycle: u64,
+    duration_cycles: u64,
+}
+
+impl KeyPress {
+    const fn active_at(self, cycle: u64) -> bool {
+        cycle >= self.start_cycle && cycle - self.start_cycle < self.duration_cycles
+    }
+}
+
+fn scheduled_key_mask(key_presses: &[KeyPress], cycle: u64) -> u16 {
+    key_presses.iter().fold(0, |mask, press| {
+        if press.active_at(cycle) {
+            mask | press.key.mask()
+        } else {
+            mask
+        }
+    })
+}
+
+fn write_framebuffer_ppm(mut output: impl Write, framebuffer: &[u32]) -> std::io::Result<()> {
+    if framebuffer.len() != Gba::SCREEN_WIDTH * Gba::SCREEN_HEIGHT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "framebuffer dimensions do not match the GBA display",
+        ));
+    }
+
+    write!(
+        output,
+        "P6\n{} {}\n255\n",
+        Gba::SCREEN_WIDTH,
+        Gba::SCREEN_HEIGHT
+    )?;
+
+    for pixel in framebuffer {
+        output.write_all(&[(pixel >> 16) as u8, (pixel >> 8) as u8, *pixel as u8])?;
     }
 
     Ok(())
@@ -206,6 +293,8 @@ struct Config {
     rom_path: PathBuf,
     headless_cycles: Option<u64>,
     watch_address: Option<u32>,
+    framebuffer_output: Option<PathBuf>,
+    key_presses: Vec<KeyPress>,
     strict_cpu: bool,
 }
 
@@ -221,6 +310,8 @@ impl Config {
         let mut rom_path = None;
         let mut headless_cycles = None;
         let mut watch_address = None;
+        let mut framebuffer_output = None;
+        let mut key_presses = Vec::new();
         let mut strict_cpu = false;
 
         while let Some(argument) = args.next() {
@@ -265,6 +356,22 @@ impl Config {
                         );
                 }
 
+                Some("--framebuffer-output") => {
+                    let value = args.next().ok_or(CliError::MissingOptionValue {
+                        option: "--framebuffer-output",
+                    })?;
+
+                    framebuffer_output = Some(PathBuf::from(value));
+                }
+
+                Some("--press-key") => {
+                    let value = args.next().ok_or(CliError::MissingOptionValue {
+                        option: "--press-key",
+                    })?;
+
+                    key_presses.push(parse_key_press(value)?);
+                }
+
                 Some("--strict-cpu") => {
                     strict_cpu = true;
                 }
@@ -285,8 +392,24 @@ impl Config {
 
         let rom_path = rom_path.ok_or(CliError::MissingRequiredOption { option: "--rom" })?;
 
-        if strict_cpu && headless_cycles.is_none() {
-            return Err(CliError::StrictCpuRequiresHeadless);
+        if headless_cycles.is_none() {
+            if strict_cpu {
+                return Err(CliError::HeadlessOptionRequiresHeadless {
+                    option: "--strict-cpu",
+                });
+            }
+
+            if framebuffer_output.is_some() {
+                return Err(CliError::HeadlessOptionRequiresHeadless {
+                    option: "--framebuffer-output",
+                });
+            }
+
+            if !key_presses.is_empty() {
+                return Err(CliError::HeadlessOptionRequiresHeadless {
+                    option: "--press-key",
+                });
+            }
         }
 
         Ok(Self {
@@ -294,6 +417,8 @@ impl Config {
             rom_path,
             headless_cycles,
             watch_address,
+            framebuffer_output,
+            key_presses,
             strict_cpu,
         })
     }
@@ -313,6 +438,74 @@ fn parse_u64_option(option: &'static str, value: OsString) -> Result<u64, CliErr
         };
 
     parsed.map_err(|_| CliError::InvalidInteger { option, value })
+}
+
+fn parse_key_press(value: OsString) -> Result<KeyPress, CliError> {
+    let text = value.to_str().ok_or_else(|| CliError::InvalidKeyPress {
+        value: value.clone(),
+        detail: "value is not valid Unicode",
+    })?;
+
+    let parts: Vec<_> = text.split(':').collect();
+
+    if parts.len() != 3 {
+        return Err(CliError::InvalidKeyPress {
+            value: value.clone(),
+            detail: "expected KEY:START-CYCLE:DURATION-CYCLES",
+        });
+    }
+
+    let key = match parts[0].to_ascii_uppercase().as_str() {
+        "A" => Key::A,
+        "B" => Key::B,
+        "SELECT" => Key::Select,
+        "START" => Key::Start,
+        "RIGHT" => Key::Right,
+        "LEFT" => Key::Left,
+        "UP" => Key::Up,
+        "DOWN" => Key::Down,
+        "R" => Key::R,
+        "L" => Key::L,
+        _ => {
+            return Err(CliError::InvalidKeyPress {
+                value: value.clone(),
+                detail: "unknown key name",
+            });
+        }
+    };
+
+    let start_cycle =
+        parse_key_press_integer(parts[1]).ok_or_else(|| CliError::InvalidKeyPress {
+            value: value.clone(),
+            detail: "start cycle is not a valid integer",
+        })?;
+
+    let duration_cycles =
+        parse_key_press_integer(parts[2]).ok_or_else(|| CliError::InvalidKeyPress {
+            value: value.clone(),
+            detail: "duration is not a valid integer",
+        })?;
+
+    if duration_cycles == 0 {
+        return Err(CliError::InvalidKeyPress {
+            value,
+            detail: "duration must be greater than zero",
+        });
+    }
+
+    Ok(KeyPress {
+        key,
+        start_cycle,
+        duration_cycles,
+    })
+}
+
+fn parse_key_press_integer(text: &str) -> Option<u64> {
+    if let Some(hexadecimal) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        u64::from_str_radix(hexadecimal, 16).ok()
+    } else {
+        text.parse().ok()
+    }
 }
 
 #[derive(Debug)]
@@ -335,7 +528,13 @@ enum CliError {
         option: &'static str,
         value: u64,
     },
-    StrictCpuRequiresHeadless,
+    HeadlessOptionRequiresHeadless {
+        option: &'static str,
+    },
+    InvalidKeyPress {
+        value: OsString,
+        detail: &'static str,
+    },
 }
 
 impl fmt::Display for CliError {
@@ -378,8 +577,12 @@ impl fmt::Display for CliError {
                 write!(formatter, "value for {option} is out of range: {value}")
             }
 
-            Self::StrictCpuRequiresHeadless => {
-                write!(formatter, "--strict-cpu requires --headless-cycles")
+            Self::HeadlessOptionRequiresHeadless { option } => {
+                write!(formatter, "{option} requires --headless-cycles")
+            }
+
+            Self::InvalidKeyPress { value, detail } => {
+                write!(formatter, "invalid --press-key value {value:?}: {detail}")
             }
         }
     }
@@ -400,6 +603,10 @@ Options:
                     Run without SDL for a fixed CPU-cycle budget
   --watch-address <address>
                     Print a 32-bit memory value after a headless run
+  --framebuffer-output <path>
+                    Write the final headless framebuffer as a binary PPM image
+  --press-key <key>:<start>:<duration>
+                    Hold a GBA key during a headless cycle interval; repeatable
   --strict-cpu      Stop a headless run at the first CPU decode/execution fault
   -h, --help       Show this help message
 "
@@ -408,9 +615,14 @@ Options:
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::{ffi::OsString, path::PathBuf};
 
-    use super::{CliError, Config, WatchStats, framebuffer_hash};
+    use super::{
+        CliError, Config, KeyPress, WatchStats, framebuffer_hash, parse_key_press,
+        scheduled_key_mask, write_framebuffer_ppm,
+    };
+
+    use crate::bus::Key;
 
     #[test]
     fn framebuffer_hash_is_stable_and_pixel_sensitive() {
@@ -435,6 +647,49 @@ mod tests {
     }
 
     #[test]
+    fn framebuffer_ppm_contains_header_and_rgb_pixels() {
+        let mut framebuffer =
+            vec![0; crate::gba::Gba::SCREEN_WIDTH * crate::gba::Gba::SCREEN_HEIGHT];
+        framebuffer[0] = 0xFF12_3456;
+
+        let mut output = Vec::new();
+
+        write_framebuffer_ppm(&mut output, &framebuffer).unwrap();
+
+        assert!(output.starts_with(b"P6\n240 160\n255\n\x12\x34\x56"));
+    }
+
+    #[test]
+    fn parses_key_press_and_combines_overlapping_events() {
+        let start = parse_key_press(OsString::from("START:100:20")).unwrap();
+        let a = parse_key_press(OsString::from("a:0x69:10")).unwrap();
+
+        assert_eq!(
+            start,
+            KeyPress {
+                key: Key::Start,
+                start_cycle: 100,
+                duration_cycles: 20,
+            }
+        );
+        assert_eq!(scheduled_key_mask(&[start, a], 99), 0);
+        assert_eq!(
+            scheduled_key_mask(&[start, a], 105),
+            Key::Start.mask() | Key::A.mask()
+        );
+        assert_eq!(scheduled_key_mask(&[start, a], 115), Key::Start.mask());
+        assert_eq!(scheduled_key_mask(&[start, a], 120), 0);
+    }
+
+    #[test]
+    fn rejects_zero_duration_key_press() {
+        assert!(matches!(
+            parse_key_press(OsString::from("START:100:0")),
+            Err(CliError::InvalidKeyPress { .. })
+        ));
+    }
+
+    #[test]
     fn parses_headless_diagnostic_options() {
         let config = Config::from_args(
             [
@@ -447,6 +702,10 @@ mod tests {
                 "1000000",
                 "--watch-address",
                 "0x030022DC",
+                "--framebuffer-output",
+                "frame.ppm",
+                "--press-key",
+                "START:1200000000:1000000",
                 "--strict-cpu",
             ]
             .map(OsString::from),
@@ -455,6 +714,8 @@ mod tests {
 
         assert_eq!(config.headless_cycles, Some(1_000_000));
         assert_eq!(config.watch_address, Some(0x0300_22DC));
+        assert_eq!(config.framebuffer_output, Some(PathBuf::from("frame.ppm")));
+        assert_eq!(config.key_presses.len(), 1);
         assert!(config.strict_cpu);
     }
 
@@ -473,6 +734,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(error, CliError::StrictCpuRequiresHeadless));
+        assert!(matches!(
+            error,
+            CliError::HeadlessOptionRequiresHeadless {
+                option: "--strict-cpu"
+            }
+        ));
     }
 }

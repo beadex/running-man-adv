@@ -852,6 +852,7 @@ impl Video {
 
         match self.display_control.mode() {
             VideoMode::Mode0 => self.render_mode0_scanline(line, vram, palette, oam),
+            VideoMode::Mode1 => self.render_mode1_scanline(line, vram, palette, oam),
             VideoMode::Mode2 => self.render_mode2_scanline(line, vram, palette, oam),
             VideoMode::Mode3 => self.render_mode3_scanline(line, vram, palette, oam),
             VideoMode::Mode4 => self.render_mode4_scanline(line, vram, palette, oam),
@@ -885,6 +886,62 @@ impl Video {
                     palette,
                 ) {
                     candidates[count] = Some(layer_from_background(background));
+                    count += 1;
+                }
+            }
+
+            if let Some(object) = self.object_line[x] {
+                candidates[count] = Some(layer_from_object(object));
+                count += 1;
+            }
+
+            candidates[count] = Some(backdrop_layer(backdrop));
+            count += 1;
+
+            self.framebuffer[destination_start + x] = self.compose_layers(&candidates[..count]);
+        }
+    }
+
+    fn render_mode1_scanline(&mut self, line: usize, vram: &[u8], palette: &[u8], oam: &[u8]) {
+        let backdrop = read_palette_color(palette, 0);
+        let destination_start = line * SCREEN_WIDTH;
+
+        self.render_object_scanline(line, vram, palette, oam);
+
+        for x in 0..SCREEN_WIDTH {
+            let mut candidates = [None; 5];
+            let mut count = 0usize;
+
+            /*
+             * Mode 1 exposes BG0 and BG1 as text backgrounds. BG2 uses the
+             * affine pipeline; BG3 is unavailable in this mode.
+             */
+            for background_index in 0..2usize {
+                if !self.display_control.background_enabled(background_index) {
+                    continue;
+                }
+
+                if let Some(background) = sample_text_background(
+                    &self.text_backgrounds[background_index],
+                    background_index,
+                    x,
+                    line,
+                    vram,
+                    palette,
+                ) {
+                    candidates[count] = Some(layer_from_background(background));
+                    count += 1;
+                }
+            }
+
+            if self.display_control.bg2_enabled() {
+                if let Some(color) = sample_affine_background(&self.bg2, x, vram, palette) {
+                    candidates[count] = Some(LayerPixel {
+                        color,
+                        priority: self.bg2.control.priority(),
+                        layer: PixelLayer::Bg2,
+                        semi_transparent: false,
+                    });
                     count += 1;
                 }
             }
@@ -2343,6 +2400,72 @@ mod tests {
 
         video.render_scanline(0, &vram, &palette, &oam);
         assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+    }
+
+    #[test]
+    fn mode1_composes_text_bg0_and_affine_bg2_by_priority() {
+        let mut video = Video::new();
+
+        video.write_display_control(1 | (1 << 8) | (1 << 10));
+
+        /* BG0: priority 1, screen block 1, text tile 1. */
+        video.write_background_control(0, 1 | (1 << 8));
+
+        /* BG2: priority 0, screen block 2, affine tile 2. */
+        {
+            let bg2 = video.affine_background_mut(2);
+            bg2.write_control(2 << 8);
+            bg2.write_pa(0x0100);
+            bg2.write_pd(0x0100);
+        }
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let oam = vec![0u8; 0x400];
+
+        vram[0x800..0x802].copy_from_slice(&1u16.to_le_bytes());
+        vram[32] = 0x01;
+
+        vram[0x1000] = 2;
+        vram[128] = 2;
+
+        palette[2..4].copy_from_slice(&0x001Fu16.to_le_bytes());
+        palette[4..6].copy_from_slice(&0x7C00u16.to_le_bytes());
+
+        video.begin_frame();
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFF00_00FF);
+
+        /* Equal priority resolves in favor of the lower BG index. */
+        video.affine_background_mut(2).write_control(1 | (2 << 8));
+        video.begin_frame();
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+    }
+
+    #[test]
+    fn mode1_does_not_render_bg3() {
+        let mut video = Video::new();
+
+        video.write_display_control(1 | (1 << 11));
+        video.affine_background_mut(3).write_control(1 << 8);
+        video.affine_background_mut(3).write_pa(0x0100);
+        video.affine_background_mut(3).write_pd(0x0100);
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+
+        vram[0x800] = 1;
+        vram[64] = 1;
+        palette[0..2].copy_from_slice(&0x03E0u16.to_le_bytes());
+        palette[2..4].copy_from_slice(&0x001Fu16.to_le_bytes());
+
+        video.begin_frame();
+        video.render_scanline(0, &vram, &palette, &[0; 0x400]);
+
+        assert_eq!(video.framebuffer()[0], 0xFF00_FF00);
     }
 
     #[test]
