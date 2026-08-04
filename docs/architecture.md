@@ -43,6 +43,26 @@ Interactive builds display emulation speed and FPS in the SDL window title.
 The development profile uses light optimization for usable iteration speed;
 release builds remain the correct choice for performance measurements.
 
+The optional `perf-stats` feature attributes host time to PPU scanline
+rendering and reports CPU-step, HALT, and DMA counts:
+
+```text
+cargo run --release --features perf-stats -- \
+  --bios firmware/gba_bios.bin --rom roms/test.gba \
+  --headless-cycles 1200000000 --strict-cpu
+```
+
+Instrumentation changes runtime and is intended for attribution, not headline
+speed comparisons. The Emerald Mode 1 workload measured here executes roughly
+457 million CPU steps per 1.2 billion emulated cycles. Profiling initially
+showed only 4-5% of host time inside scanline rendering, but the scheduler was
+also walking an empty 160-line update set after nearly every instruction. The
+empty-update fast path reduced the same deterministic benchmark from 104.41 s
+(68.5% realtime) to 20.28 s (352.7% realtime), while preserving the final CPU
+state, frame count, and framebuffer hash. A block interpreter is therefore no
+longer required merely to reach realtime speed; it remains a possible later
+optimization after correctness work.
+
 The final dump includes CPU state, CPSR/mode, interrupt registers, PPU state,
 the window coordinates and masks (`WIN0H`, `WIN0V`, `WIN1H`, `WIN1V`, `WININ`,
 and `WINOUT`), the BIOS IRQ handler pointer, a stable framebuffer hash, and the

@@ -312,6 +312,7 @@ pub struct DmaTransferCompletion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DmaController {
     channels: [DmaChannel; DMA_CHANNEL_COUNT],
+    pending_mask: u8,
 }
 
 impl DmaController {
@@ -323,6 +324,7 @@ impl DmaController {
                 DmaChannel::new(),
                 DmaChannel::new(),
             ],
+            pending_mask: 0,
         }
     }
 
@@ -363,7 +365,8 @@ impl DmaController {
     }
 
     pub fn write_control(&mut self, index: DmaChannelIndex, value: u16) {
-        let channel = &mut self.channels[index.as_usize()];
+        let channel_number = index.as_usize();
+        let channel = &mut self.channels[channel_number];
 
         let old_enabled = channel.control.enabled();
 
@@ -378,11 +381,13 @@ impl DmaController {
 
             if new_control.start_timing() == DmaStartTiming::Immediate {
                 channel.pending_count = channel.pending_count.saturating_add(1);
+                self.pending_mask |= 1 << channel_number;
             }
         }
 
         if old_enabled && !new_enabled {
             channel.pending_count = 0;
+            self.pending_mask &= !(1 << channel_number);
         }
     }
 
@@ -402,49 +407,48 @@ impl DmaController {
     }
 
     pub fn next_pending_request(&mut self) -> Option<DmaTransferRequest> {
-        /*
-         * Lower numbered channel has higher priority.
-         */
-        for channel_number in 0..DMA_CHANNEL_COUNT {
-            let channel_index =
-                DmaChannelIndex::from_usize(channel_number).expect("valid DMA channel");
-
-            let channel = &mut self.channels[channel_number];
-
-            if channel.pending_count == 0 || !channel.control.enabled() {
-                continue;
-            }
-
-            channel.pending_count -= 1;
-
-            return Some(DmaTransferRequest {
-                channel: channel_index,
-                source: channel.internal_source,
-                destination: channel.internal_destination,
-                count: channel.internal_count,
-                width: channel.control.transfer_width(),
-
-                source_control: match channel.control.source_control() {
-                    /*
-                     * Source mode 3 is prohibited. Treat it deterministically as
-                     * increment until an explicit invalid-DMA policy is added.
-                     */
-                    DmaAddressControl::IncrementReload => DmaAddressControl::Increment,
-
-                    control => control,
-                },
-
-                destination_control: channel.control.destination_control(),
-
-                irq_enabled: channel.control.irq_enabled(),
-
-                start_timing: channel.control.start_timing(),
-
-                repeat: channel.control.repeat(),
-            });
+        if self.pending_mask == 0 {
+            return None;
         }
 
-        None
+        /* The least-significant set bit is the highest-priority channel. */
+        let channel_number = self.pending_mask.trailing_zeros() as usize;
+        let channel_index =
+            DmaChannelIndex::from_usize(channel_number).expect("pending DMA channel is valid");
+        let channel = &mut self.channels[channel_number];
+
+        debug_assert!(channel.pending_count != 0 && channel.control.enabled());
+        channel.pending_count -= 1;
+
+        if channel.pending_count == 0 {
+            self.pending_mask &= !(1 << channel_number);
+        }
+
+        Some(DmaTransferRequest {
+            channel: channel_index,
+            source: channel.internal_source,
+            destination: channel.internal_destination,
+            count: channel.internal_count,
+            width: channel.control.transfer_width(),
+
+            source_control: match channel.control.source_control() {
+                /*
+                 * Source mode 3 is prohibited. Treat it deterministically as
+                 * increment until an explicit invalid-DMA policy is added.
+                 */
+                DmaAddressControl::IncrementReload => DmaAddressControl::Increment,
+
+                control => control,
+            },
+
+            destination_control: channel.control.destination_control(),
+
+            irq_enabled: channel.control.irq_enabled(),
+
+            start_timing: channel.control.start_timing(),
+
+            repeat: channel.control.repeat(),
+        })
     }
 
     pub fn complete_transfer(&mut self, completion: DmaTransferCompletion) {
@@ -485,6 +489,7 @@ impl DmaController {
             channel.internal_count = 0;
             channel.control.set_enabled(false);
             channel.pending_count = 0;
+            self.pending_mask &= !(1 << index.as_usize());
         }
     }
 
@@ -493,7 +498,7 @@ impl DmaController {
             return;
         }
 
-        for channel in &mut self.channels {
+        for (channel_number, channel) in self.channels.iter_mut().enumerate() {
             if !channel.control.enabled() {
                 continue;
             }
@@ -503,6 +508,7 @@ impl DmaController {
             }
 
             channel.pending_count = channel.pending_count.saturating_add(occurrences);
+            self.pending_mask |= 1 << channel_number;
         }
     }
 
@@ -510,6 +516,7 @@ impl DmaController {
         for channel in &mut self.channels {
             channel.reset();
         }
+        self.pending_mask = 0;
     }
 }
 

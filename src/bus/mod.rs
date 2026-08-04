@@ -396,6 +396,11 @@ impl Bus {
         self.io.video().frame_number()
     }
 
+    #[cfg(feature = "perf-stats")]
+    pub fn video_render_profile(&self) -> (std::time::Duration, u64) {
+        self.io.video().render_profile()
+    }
+
     pub fn read8(&self, address: u32) -> u8 {
         match address {
             BIOS_BASE..=0x0000_3FFF => {
@@ -817,6 +822,16 @@ impl Bus {
 
     pub fn tick(&mut self, cycles: u32) {
         let result = self.io.tick(cycles);
+
+        /*
+         * A normal instruction is only a few cycles long, while the next
+         * PPU boundary is usually hundreds of cycles away. Avoid borrowing
+         * video and walking an empty scanline set on that overwhelmingly
+         * common path.
+         */
+        if !result.has_video_updates() {
+            return;
+        }
 
         /*
          * Render after PPU timing has reported which visible lines have

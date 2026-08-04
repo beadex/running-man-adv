@@ -24,6 +24,14 @@ pub struct Gba {
      * the ARM CPU's HALT state.
      */
     stopped: bool,
+    #[cfg(feature = "perf-stats")]
+    cpu_steps: u64,
+    #[cfg(feature = "perf-stats")]
+    cpu_cycles: u64,
+    #[cfg(feature = "perf-stats")]
+    halt_steps: u64,
+    #[cfg(feature = "perf-stats")]
+    dma_steps: u64,
 }
 
 impl Gba {
@@ -36,6 +44,14 @@ impl Gba {
             bus: Bus::new(),
             elapsed_cycles: 0,
             stopped: false,
+            #[cfg(feature = "perf-stats")]
+            cpu_steps: 0,
+            #[cfg(feature = "perf-stats")]
+            cpu_cycles: 0,
+            #[cfg(feature = "perf-stats")]
+            halt_steps: 0,
+            #[cfg(feature = "perf-stats")]
+            dma_steps: 0,
         }
     }
 
@@ -86,6 +102,13 @@ impl Gba {
 
         self.elapsed_cycles = 0;
         self.stopped = false;
+        #[cfg(feature = "perf-stats")]
+        {
+            self.cpu_steps = 0;
+            self.cpu_cycles = 0;
+            self.halt_steps = 0;
+            self.dma_steps = 0;
+        }
     }
 
     pub const SCREEN_WIDTH: usize = crate::bus::SCREEN_WIDTH;
@@ -108,6 +131,21 @@ impl Gba {
         self.bus.frame_number()
     }
 
+    #[cfg(feature = "perf-stats")]
+    pub fn video_render_profile(&self) -> (std::time::Duration, u64) {
+        self.bus.video_render_profile()
+    }
+
+    #[cfg(feature = "perf-stats")]
+    pub const fn scheduler_profile(&self) -> (u64, u64, u64, u64) {
+        (
+            self.cpu_steps,
+            self.cpu_cycles,
+            self.halt_steps,
+            self.dma_steps,
+        )
+    }
+
     /// Advances the machine by one CPU scheduling unit.
     ///
     /// At the current stage, this means:
@@ -123,6 +161,10 @@ impl Gba {
         }
 
         let cycles = if let Some(dma_result) = self.bus.run_pending_dma() {
+            #[cfg(feature = "perf-stats")]
+            {
+                self.dma_steps = self.dma_steps.wrapping_add(1);
+            }
             dma_result.cycles
         } else if self.cpu.is_halted() && !self.bus.halt_wake_requested() {
             /*
@@ -131,9 +173,19 @@ impl Gba {
              * bounded quantum preserves responsive interrupt sampling while
              * removing most of that overhead.
              */
+            #[cfg(feature = "perf-stats")]
+            {
+                self.halt_steps = self.halt_steps.wrapping_add(1);
+            }
             32
         } else {
-            self.cpu.step(&mut self.bus)
+            let cpu_cycles = self.cpu.step(&mut self.bus);
+            #[cfg(feature = "perf-stats")]
+            {
+                self.cpu_steps = self.cpu_steps.wrapping_add(1);
+                self.cpu_cycles = self.cpu_cycles.wrapping_add(cpu_cycles as u64);
+            }
+            cpu_cycles
         };
 
         /*

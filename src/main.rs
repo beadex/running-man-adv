@@ -218,6 +218,25 @@ fn run_headless(
         bus.read16(crate::bus::Bus::REG_VCOUNT)
     );
     println!("  frame:            {}", gba.frame_number());
+    #[cfg(feature = "perf-stats")]
+    {
+        let (render_time, rendered_scanlines) = gba.video_render_profile();
+        println!("  PPU render time:  {:.3} s", render_time.as_secs_f64());
+        println!("  rendered lines:   {rendered_scanlines}");
+        println!(
+            "  PPU render share: {:.1}%",
+            render_time.as_secs_f64() / benchmark_elapsed.as_secs_f64() * 100.0
+        );
+        let (cpu_steps, cpu_cycles, halt_steps, dma_steps) = gba.scheduler_profile();
+        println!("  CPU steps:        {cpu_steps}");
+        println!("  CPU cycles:       {cpu_cycles}");
+        println!(
+            "  cycles/CPU step:  {:.3}",
+            cpu_cycles as f64 / cpu_steps.max(1) as f64
+        );
+        println!("  HALT quanta:      {halt_steps}");
+        println!("  DMA runs:         {dma_steps}");
+    }
     println!(
         "  framebuffer hash: 0x{:016X}",
         framebuffer_hash(gba.framebuffer())

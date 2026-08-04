@@ -1,3 +1,6 @@
+#[cfg(feature = "perf-stats")]
+use std::time::{Duration, Instant};
+
 pub const SCREEN_WIDTH: usize = 240;
 pub const SCREEN_HEIGHT: usize = 160;
 pub const FRAMEBUFFER_PIXEL_COUNT: usize = SCREEN_WIDTH * SCREEN_HEIGHT;
@@ -768,6 +771,10 @@ pub struct Video {
     blend_brightness: BlendBrightness,
     frame_ready: bool,
     frame_number: u64,
+    #[cfg(feature = "perf-stats")]
+    render_time: Duration,
+    #[cfg(feature = "perf-stats")]
+    rendered_scanlines: u64,
 }
 
 impl Video {
@@ -793,6 +800,10 @@ impl Video {
             blend_brightness: BlendBrightness::new(),
             frame_ready: false,
             frame_number: 0,
+            #[cfg(feature = "perf-stats")]
+            render_time: Duration::ZERO,
+            #[cfg(feature = "perf-stats")]
+            rendered_scanlines: 0,
         }
     }
 
@@ -954,6 +965,11 @@ impl Video {
         self.frame_number
     }
 
+    #[cfg(feature = "perf-stats")]
+    pub const fn render_profile(&self) -> (Duration, u64) {
+        (self.render_time, self.rendered_scanlines)
+    }
+
     pub fn mark_frame_ready(&mut self) {
         self.frame_ready = true;
         self.frame_number = self.frame_number.wrapping_add(1);
@@ -965,6 +981,9 @@ impl Video {
     }
 
     pub fn render_scanline(&mut self, line: u16, vram: &[u8], palette: &[u8], oam: &[u8]) {
+        #[cfg(feature = "perf-stats")]
+        let render_started = Instant::now();
+
         let line = line as usize;
 
         if line >= SCREEN_HEIGHT {
@@ -974,6 +993,8 @@ impl Video {
         if self.display_control.forced_blank() {
             self.fill_scanline(line, Self::FORCED_BLANK_PIXEL);
             self.advance_affine_scanline();
+            #[cfg(feature = "perf-stats")]
+            self.record_render_time(render_started);
             return;
         }
 
@@ -987,6 +1008,15 @@ impl Video {
         }
 
         self.advance_affine_scanline();
+
+        #[cfg(feature = "perf-stats")]
+        self.record_render_time(render_started);
+    }
+
+    #[cfg(feature = "perf-stats")]
+    fn record_render_time(&mut self, started: Instant) {
+        self.render_time += started.elapsed();
+        self.rendered_scanlines = self.rendered_scanlines.wrapping_add(1);
     }
 
     fn render_mode0_scanline(&mut self, line: usize, vram: &[u8], palette: &[u8], oam: &[u8]) {
@@ -1534,6 +1564,11 @@ impl Video {
         self.blend_brightness = BlendBrightness::new();
         self.frame_ready = false;
         self.frame_number = 0;
+        #[cfg(feature = "perf-stats")]
+        {
+            self.render_time = Duration::ZERO;
+            self.rendered_scanlines = 0;
+        }
     }
 }
 

@@ -265,12 +265,14 @@ impl Default for Timer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimerController {
     timers: [Timer; TIMER_COUNT],
+    enabled_mask: u8,
 }
 
 impl TimerController {
     pub const fn new() -> Self {
         Self {
             timers: [Timer::new(), Timer::new(), Timer::new(), Timer::new()],
+            enabled_mask: 0,
         }
     }
 
@@ -296,6 +298,13 @@ impl TimerController {
 
     pub fn write_control(&mut self, index: TimerIndex, value: u16) {
         self.timer_mut(index).write_control(value);
+
+        let mask = 1 << index.as_usize();
+        if self.timer(index).control().enabled() {
+            self.enabled_mask |= mask;
+        } else {
+            self.enabled_mask &= !mask;
+        }
     }
 
     /// Advances every timer and returns an interrupt-source mask.
@@ -304,10 +313,15 @@ impl TimerController {
     /// CPU clock or increment once for each overflow of the preceding
     /// timer.
     pub fn tick(&mut self, cycles: u32) -> u16 {
+        if self.enabled_mask == 0 {
+            return 0;
+        }
+
         let mut interrupt_mask = 0u16;
         let mut previous_overflows = 0u64;
+        let last_enabled = 7 - self.enabled_mask.leading_zeros() as usize;
 
-        for index in 0..TIMER_COUNT {
+        for index in 0..=last_enabled {
             let timer_index = TimerIndex::from_usize(index).expect("valid timer index");
 
             let timer = &mut self.timers[index];
@@ -336,6 +350,7 @@ impl TimerController {
         for timer in &mut self.timers {
             timer.reset();
         }
+        self.enabled_mask = 0;
     }
 }
 

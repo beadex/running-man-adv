@@ -196,6 +196,15 @@ impl PpuTickResult {
             completed_visible_lines: VisibleScanlineSet::new(),
         }
     }
+
+    /// Returns true when Bus must touch the host-facing video state.
+    ///
+    /// Most CPU instructions do not cross a PPU boundary. Keeping this
+    /// check cheap avoids constructing an empty scanline iteration in the
+    /// scheduler's hottest path.
+    pub const fn has_video_updates(self) -> bool {
+        self.new_frames != 0 || self.vblank_starts != 0 || !self.completed_visible_lines.is_empty()
+    }
 }
 
 impl Default for PpuTickResult {
@@ -375,9 +384,20 @@ impl Default for Ppu {
 
 #[cfg(test)]
 mod tests {
-    use super::Ppu;
+    use super::{Ppu, PpuTickResult};
 
     use crate::bus::InterruptSource;
+
+    #[test]
+    fn tick_result_only_requests_video_work_for_visible_updates() {
+        let mut result = PpuTickResult::new();
+
+        assert!(!result.has_video_updates());
+
+        result.completed_visible_lines.insert(42);
+
+        assert!(result.has_video_updates());
+    }
 
     #[test]
     fn visible_scanline_completes_at_hblank_start() {
