@@ -14,10 +14,13 @@ use sdl3::{
 };
 
 use crate::{
-    bus::{AUDIO_OUTPUT_RATE, Bus, Key, SCREEN_HEIGHT, SCREEN_WIDTH},
+    bus::{AUDIO_OUTPUT_RATE, Key, SCREEN_HEIGHT, SCREEN_WIDTH},
     gba::Gba,
     save_file::SaveFile,
 };
+
+#[cfg(feature = "cpu-trace")]
+use crate::bus::Bus;
 
 /*
  * GBA master clock:
@@ -89,10 +92,8 @@ fn process_events(
                 repeat,
                 ..
             } => {
-                if !repeat {
-                    if let Some(key) = map_keycode(keycode) {
-                        gba.press_key(key);
-                    }
+                if !repeat && let Some(key) = map_keycode(keycode) {
+                    gba.press_key(key);
                 }
             }
 
@@ -376,6 +377,7 @@ pub fn run(gba: &mut Gba, save_file: &SaveFile) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "cpu-trace")]
 fn log_emulator_state(gba: &Gba) {
     let dispcnt = gba.bus().read16(Bus::REG_DISPCNT);
 

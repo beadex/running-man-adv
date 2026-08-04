@@ -855,7 +855,6 @@ fn execute_pop(
         let access = bus.read32_timed(address, access_kind(&mut first));
         cycles = cycles.saturating_add(access.cycles);
         registers.set_pc(access.value & !1);
-        address = address.wrapping_add(4);
         true
     } else {
         false
@@ -1344,7 +1343,7 @@ mod tests {
     use super::execute_thumb;
 
     use crate::{
-        bus::{AccessKind, Bus},
+        bus::Bus,
         cpu::{
             CpuMode, Registers,
             thumb::{

@@ -169,7 +169,7 @@ pub const fn classify(instruction: u32) -> ArmInstructionKind {
     } else if is_halfword_data_transfer(instruction) {
         ArmInstructionKind::HalfwordDataTransfer
     } else if is_status_register_instruction(instruction) {
-        return ArmInstructionKind::StatusRegister;
+        ArmInstructionKind::StatusRegister
     } else {
         classify_major_group(instruction)
     }

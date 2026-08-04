@@ -232,6 +232,12 @@ impl Registers {
     }
 }
 
+impl Default for Registers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[test]
 fn supervisor_and_irq_have_separate_stack_pointers() {
     let mut registers = Registers::new();

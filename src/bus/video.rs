@@ -1104,16 +1104,17 @@ impl Video {
                 }
             }
 
-            if self.display_control.bg2_enabled() && window.layer_enabled(PixelLayer::Bg2) {
-                if let Some(color) = sample_affine_background(&self.bg2, x, vram, palette) {
-                    candidates[count] = Some(LayerPixel {
-                        color,
-                        priority: self.bg2.control.priority(),
-                        layer: PixelLayer::Bg2,
-                        semi_transparent: false,
-                    });
-                    count += 1;
-                }
+            if self.display_control.bg2_enabled()
+                && window.layer_enabled(PixelLayer::Bg2)
+                && let Some(color) = sample_affine_background(&self.bg2, x, vram, palette)
+            {
+                candidates[count] = Some(LayerPixel {
+                    color,
+                    priority: self.bg2.control.priority(),
+                    layer: PixelLayer::Bg2,
+                    semi_transparent: false,
+                });
+                count += 1;
             }
 
             if window.layer_enabled(PixelLayer::Obj)
@@ -1142,28 +1143,30 @@ impl Video {
             let mut candidates = [None; 4];
             let mut count = 0usize;
 
-            if self.display_control.bg2_enabled() && window.layer_enabled(PixelLayer::Bg2) {
-                if let Some(color) = sample_affine_background(&self.bg2, x, vram, palette) {
-                    candidates[count] = Some(LayerPixel {
-                        color,
-                        priority: self.bg2.control.priority(),
-                        layer: PixelLayer::Bg2,
-                        semi_transparent: false,
-                    });
-                    count += 1;
-                }
+            if self.display_control.bg2_enabled()
+                && window.layer_enabled(PixelLayer::Bg2)
+                && let Some(color) = sample_affine_background(&self.bg2, x, vram, palette)
+            {
+                candidates[count] = Some(LayerPixel {
+                    color,
+                    priority: self.bg2.control.priority(),
+                    layer: PixelLayer::Bg2,
+                    semi_transparent: false,
+                });
+                count += 1;
             }
 
-            if self.display_control.bg3_enabled() && window.layer_enabled(PixelLayer::Bg3) {
-                if let Some(color) = sample_affine_background(&self.bg3, x, vram, palette) {
-                    candidates[count] = Some(LayerPixel {
-                        color,
-                        priority: self.bg3.control.priority(),
-                        layer: PixelLayer::Bg3,
-                        semi_transparent: false,
-                    });
-                    count += 1;
-                }
+            if self.display_control.bg3_enabled()
+                && window.layer_enabled(PixelLayer::Bg3)
+                && let Some(color) = sample_affine_background(&self.bg3, x, vram, palette)
+            {
+                candidates[count] = Some(LayerPixel {
+                    color,
+                    priority: self.bg3.control.priority(),
+                    layer: PixelLayer::Bg3,
+                    semi_transparent: false,
+                });
+                count += 1;
             }
 
             if window.layer_enabled(PixelLayer::Obj)
@@ -1178,49 +1181,6 @@ impl Video {
 
             self.framebuffer[destination_start + x] =
                 self.compose_layers_with_effects(&candidates[..count], window.effects_enabled());
-        }
-    }
-
-    fn sample_mode2_background_pixel(
-        &self,
-        x: usize,
-        vram: &[u8],
-        palette: &[u8],
-    ) -> Option<BackgroundPixel> {
-        let bg2 = if self.display_control.bg2_enabled() {
-            sample_affine_background(&self.bg2, x, vram, palette).map(|color| BackgroundPixel {
-                color,
-                priority: self.bg2.control.priority(),
-                layer: 2,
-            })
-        } else {
-            None
-        };
-
-        let bg3 = if self.display_control.bg3_enabled() {
-            sample_affine_background(&self.bg3, x, vram, palette).map(|color| BackgroundPixel {
-                color,
-                priority: self.bg3.control.priority(),
-                layer: 3,
-            })
-        } else {
-            None
-        };
-
-        match (bg2, bg3) {
-            (Some(bg2), Some(bg3)) => {
-                if bg2.priority < bg3.priority
-                    || (bg2.priority == bg3.priority && bg2.layer < bg3.layer)
-                {
-                    Some(bg2)
-                } else {
-                    Some(bg3)
-                }
-            }
-
-            (Some(bg2), None) => Some(bg2),
-            (None, Some(bg3)) => Some(bg3),
-            (None, None) => None,
         }
     }
 
@@ -1361,7 +1321,7 @@ impl Video {
             };
 
             let object_y = attributes.y() as i32;
-            let local_y = ((line as i32 - object_y) & 0xFF) as i32;
+            let local_y = (line as i32 - object_y) & 0xFF;
 
             if local_y >= display_height as i32 {
                 continue;
@@ -1381,10 +1341,8 @@ impl Video {
                         attributes,
                         local_x,
                         local_y,
-                        texture_width,
-                        texture_height,
-                        display_width,
-                        display_height,
+                        (texture_width, texture_height),
+                        (display_width, display_height),
                         oam,
                     )
                 } else {
@@ -1428,6 +1386,7 @@ impl Video {
         }
     }
 
+    #[cfg(test)]
     fn compose_layers(&self, candidates: &[Option<LayerPixel>]) -> u32 {
         self.compose_layers_with_effects(candidates, true)
     }
@@ -1452,15 +1411,17 @@ impl Video {
          * of BLDCNT effect mode. The lower pixel still has to be selected as
          * a second target.
          */
-        if effects_enabled && top.layer == PixelLayer::Obj && top.semi_transparent {
-            if let Some(second) = find_second_target(candidates, top, self.blend_control) {
-                return blend_alpha_rgba(
-                    top.color,
-                    second.color,
-                    self.blend_alpha.eva(),
-                    self.blend_alpha.evb(),
-                );
-            }
+        if effects_enabled
+            && top.layer == PixelLayer::Obj
+            && top.semi_transparent
+            && let Some(second) = find_second_target(candidates, top, self.blend_control)
+        {
+            return blend_alpha_rgba(
+                top.color,
+                second.color,
+                self.blend_alpha.eva(),
+                self.blend_alpha.evb(),
+            );
         }
 
         if !effects_enabled {
@@ -1469,15 +1430,15 @@ impl Video {
 
         match self.blend_control.effect() {
             BlendEffect::Alpha => {
-                if self.blend_control.first_target(top.layer) {
-                    if let Some(second) = find_second_target(candidates, top, self.blend_control) {
-                        return blend_alpha_rgba(
-                            top.color,
-                            second.color,
-                            self.blend_alpha.eva(),
-                            self.blend_alpha.evb(),
-                        );
-                    }
+                if self.blend_control.first_target(top.layer)
+                    && let Some(second) = find_second_target(candidates, top, self.blend_control)
+                {
+                    return blend_alpha_rgba(
+                        top.color,
+                        second.color,
+                        self.blend_alpha.eva(),
+                        self.blend_alpha.evb(),
+                    );
                 }
             }
 
@@ -1575,25 +1536,6 @@ impl Video {
 impl Default for Video {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-fn choose_top_background(
-    current: Option<BackgroundPixel>,
-    candidate: Option<BackgroundPixel>,
-) -> Option<BackgroundPixel> {
-    match (current, candidate) {
-        (Some(current), Some(candidate)) => {
-            if candidate.priority < current.priority
-                || (candidate.priority == current.priority && candidate.layer < current.layer)
-            {
-                Some(candidate)
-            } else {
-                Some(current)
-            }
-        }
-        (None, candidate) => candidate,
-        (current, None) => current,
     }
 }
 
@@ -1871,12 +1813,12 @@ fn affine_object_source_coordinates(
     attributes: ObjectAttributes,
     local_x: i32,
     local_y: i32,
-    texture_width: usize,
-    texture_height: usize,
-    display_width: usize,
-    display_height: usize,
+    texture_size: (usize, usize),
+    display_size: (usize, usize),
     oam: &[u8],
 ) -> Option<(usize, usize)> {
+    let (texture_width, texture_height) = texture_size;
+    let (display_width, display_height) = display_size;
     let (pa, pb, pc, pd) = read_object_affine_matrix(oam, attributes.affine_parameter_index())?;
 
     let centered_x = local_x - display_width as i32 / 2;

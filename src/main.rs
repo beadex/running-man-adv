@@ -1,10 +1,3 @@
-mod bus;
-mod cpu;
-mod frontend;
-mod gba;
-mod loader;
-mod save_file;
-
 use std::{
     env,
     error::Error,
@@ -19,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use crate::{
+use running_man_adv::{
     bus::Key,
     frontend::sdl,
     gba::Gba,
@@ -76,7 +69,7 @@ fn run() -> Result<()> {
         .map(|path| SaveFile::new(path.clone()))
         .unwrap_or_else(|| SaveFile::for_rom(&config.rom_path));
 
-    if gba.cartridge_save_type() == crate::bus::CartridgeSaveType::None {
+    if gba.cartridge_save_type() == running_man_adv::bus::CartridgeSaveType::None {
         println!("Save: none ({})", gba.cartridge_save_type().name());
     } else {
         println!(
@@ -188,42 +181,42 @@ fn run_headless(
     println!("  halted:           {}", gba.cpu().is_halted());
     println!(
         "  IE:               0x{:04X}",
-        bus.read16(crate::bus::Bus::REG_IE)
+        bus.read16(running_man_adv::bus::Bus::REG_IE)
     );
     println!(
         "  IF:               0x{:04X}",
-        bus.read16(crate::bus::Bus::REG_IF)
+        bus.read16(running_man_adv::bus::Bus::REG_IF)
     );
     println!(
         "  IME:              0x{:04X}",
-        bus.read16(crate::bus::Bus::REG_IME)
+        bus.read16(running_man_adv::bus::Bus::REG_IME)
     );
     println!(
         "  DISPSTAT:         0x{:04X}",
-        bus.read16(crate::bus::Bus::REG_DISPSTAT)
+        bus.read16(running_man_adv::bus::Bus::REG_DISPSTAT)
     );
     println!(
         "  DISPCNT:          0x{:04X}",
-        bus.read16(crate::bus::Bus::REG_DISPCNT)
+        bus.read16(running_man_adv::bus::Bus::REG_DISPCNT)
     );
     println!(
         "  WIN0H/WIN0V:      0x{:04X}/0x{:04X}",
-        bus.read16(crate::bus::Bus::REG_WIN0H),
-        bus.read16(crate::bus::Bus::REG_WIN0V)
+        bus.read16(running_man_adv::bus::Bus::REG_WIN0H),
+        bus.read16(running_man_adv::bus::Bus::REG_WIN0V)
     );
     println!(
         "  WIN1H/WIN1V:      0x{:04X}/0x{:04X}",
-        bus.read16(crate::bus::Bus::REG_WIN1H),
-        bus.read16(crate::bus::Bus::REG_WIN1V)
+        bus.read16(running_man_adv::bus::Bus::REG_WIN1H),
+        bus.read16(running_man_adv::bus::Bus::REG_WIN1V)
     );
     println!(
         "  WININ/WINOUT:     0x{:04X}/0x{:04X}",
-        bus.read16(crate::bus::Bus::REG_WININ),
-        bus.read16(crate::bus::Bus::REG_WINOUT)
+        bus.read16(running_man_adv::bus::Bus::REG_WININ),
+        bus.read16(running_man_adv::bus::Bus::REG_WINOUT)
     );
     println!(
         "  VCOUNT:           {}",
-        bus.read16(crate::bus::Bus::REG_VCOUNT)
+        bus.read16(running_man_adv::bus::Bus::REG_VCOUNT)
     );
     println!("  frame:            {}", gba.frame_number());
     #[cfg(feature = "perf-stats")]
@@ -743,7 +736,7 @@ mod tests {
         performance_metrics, scheduled_key_mask, write_framebuffer_ppm,
     };
 
-    use crate::bus::Key;
+    use running_man_adv::bus::Key;
 
     #[test]
     fn framebuffer_hash_is_stable_and_pixel_sensitive() {
@@ -777,8 +770,11 @@ mod tests {
 
     #[test]
     fn framebuffer_ppm_contains_header_and_rgb_pixels() {
-        let mut framebuffer =
-            vec![0; crate::gba::Gba::SCREEN_WIDTH * crate::gba::Gba::SCREEN_HEIGHT];
+        let mut framebuffer = vec![
+            0;
+            running_man_adv::gba::Gba::SCREEN_WIDTH
+                * running_man_adv::gba::Gba::SCREEN_HEIGHT
+        ];
         framebuffer[0] = 0xFF12_3456;
 
         let mut output = Vec::new();

@@ -14,7 +14,9 @@ pub struct AddResult {
 
 /// Performs:
 ///
-///     x + y + carry_in
+/// ```text
+/// x + y + carry_in
+/// ```
 ///
 /// and calculates ARM-compatible N, Z, C and V flags.
 ///

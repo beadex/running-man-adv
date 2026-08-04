@@ -41,6 +41,7 @@ impl RtcDateTime {
 #[derive(Debug, Clone, Copy)]
 enum RtcClock {
     HostLocal,
+    #[cfg(test)]
     Fixed(RtcDateTime),
 }
 
@@ -48,6 +49,7 @@ impl RtcClock {
     fn now(self) -> RtcDateTime {
         match self {
             Self::HostLocal => RtcDateTime::local_now(),
+            #[cfg(test)]
             Self::Fixed(value) => value,
         }
     }

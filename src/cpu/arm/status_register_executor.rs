@@ -1,8 +1,8 @@
 use crate::cpu::{Cpsr, CpuMode, Registers, SpsrAccessError};
 
 use super::{
-    ArmCondition, ProgramStatusRegister, StatusRegisterInstruction, StatusRegisterMask,
-    StatusRegisterOperand, expand_rotated_immediate,
+    ProgramStatusRegister, StatusRegisterInstruction, StatusRegisterMask, StatusRegisterOperand,
+    expand_rotated_immediate,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +133,7 @@ fn write_spsr(
 mod tests {
     use super::*;
 
+    use crate::cpu::arm::ArmCondition;
     use crate::cpu::{CpuMode, Registers};
 
     #[test]

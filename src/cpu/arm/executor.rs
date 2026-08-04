@@ -171,10 +171,7 @@ mod tests {
 
     use crate::{
         bus::Bus,
-        cpu::{
-            Registers,
-            arm::{ArmExecutionResult, decode_arm},
-        },
+        cpu::{Registers, arm::decode_arm},
     };
 
     #[test]
