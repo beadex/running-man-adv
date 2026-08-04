@@ -97,6 +97,13 @@ impl IoRegisters {
     pub const BG3Y_L_OFFSET: u32 = 0x003C;
     pub const BG3Y_H_OFFSET: u32 = 0x003E;
 
+    pub const WIN0H_OFFSET: u32 = 0x0040;
+    pub const WIN1H_OFFSET: u32 = 0x0042;
+    pub const WIN0V_OFFSET: u32 = 0x0044;
+    pub const WIN1V_OFFSET: u32 = 0x0046;
+    pub const WININ_OFFSET: u32 = 0x0048;
+    pub const WINOUT_OFFSET: u32 = 0x004A;
+
     pub const KEYINPUT_OFFSET: u32 = 0x0130;
     pub const KEYCNT_OFFSET: u32 = 0x0132;
 
@@ -310,6 +317,12 @@ impl IoRegisters {
                 | Self::BG3X_H_OFFSET
                 | Self::BG3Y_L_OFFSET
                 | Self::BG3Y_H_OFFSET
+                | Self::WIN0H_OFFSET
+                | Self::WIN1H_OFFSET
+                | Self::WIN0V_OFFSET
+                | Self::WIN1V_OFFSET
+                | Self::WININ_OFFSET
+                | Self::WINOUT_OFFSET
                 | Self::KEYINPUT_OFFSET
                 | Self::KEYCNT_OFFSET
                 | Self::IE_OFFSET
@@ -373,7 +386,7 @@ impl IoRegisters {
             return;
         }
 
-        if is_affine_video_register(aligned) {
+        if is_mutable_video_register(aligned) {
             let current = self.read16(aligned);
             let updated = replace_byte(current, high_byte, value);
             self.write16(aligned, updated);
@@ -557,6 +570,13 @@ impl IoRegisters {
             Self::BG3Y_H_OFFSET => {
                 return (self.video.affine_background(3).reference_y_raw() >> 16) as u16;
             }
+
+            Self::WIN0H_OFFSET => return self.video.read_window_horizontal(0),
+            Self::WIN1H_OFFSET => return self.video.read_window_horizontal(1),
+            Self::WIN0V_OFFSET => return self.video.read_window_vertical(0),
+            Self::WIN1V_OFFSET => return self.video.read_window_vertical(1),
+            Self::WININ_OFFSET => return self.video.read_window_inside(),
+            Self::WINOUT_OFFSET => return self.video.read_window_outside(),
 
             Self::KEYINPUT_OFFSET => {
                 return self.keypad.key_input();
@@ -784,6 +804,31 @@ impl IoRegisters {
                 self.video
                     .affine_background_mut(3)
                     .write_reference_y_high(value);
+                return;
+            }
+
+            Self::WIN0H_OFFSET => {
+                self.video.write_window_horizontal(0, value);
+                return;
+            }
+            Self::WIN1H_OFFSET => {
+                self.video.write_window_horizontal(1, value);
+                return;
+            }
+            Self::WIN0V_OFFSET => {
+                self.video.write_window_vertical(0, value);
+                return;
+            }
+            Self::WIN1V_OFFSET => {
+                self.video.write_window_vertical(1, value);
+                return;
+            }
+            Self::WININ_OFFSET => {
+                self.video.write_window_inside(value);
+                return;
+            }
+            Self::WINOUT_OFFSET => {
+                self.video.write_window_outside(value);
                 return;
             }
 
@@ -1021,7 +1066,7 @@ enum TimerRegister {
     Control,
 }
 
-const fn is_affine_video_register(offset: u32) -> bool {
+const fn is_mutable_video_register(offset: u32) -> bool {
     matches!(
         offset,
         IoRegisters::BG0CNT_OFFSET
@@ -1055,6 +1100,12 @@ const fn is_affine_video_register(offset: u32) -> bool {
             | IoRegisters::BG3X_H_OFFSET
             | IoRegisters::BG3Y_L_OFFSET
             | IoRegisters::BG3Y_H_OFFSET
+            | IoRegisters::WIN0H_OFFSET
+            | IoRegisters::WIN1H_OFFSET
+            | IoRegisters::WIN0V_OFFSET
+            | IoRegisters::WIN1V_OFFSET
+            | IoRegisters::WININ_OFFSET
+            | IoRegisters::WINOUT_OFFSET
     )
 }
 
@@ -1617,6 +1668,23 @@ mod tests {
 
         assert_eq!(io.read16(IoRegisters::BG2PA_OFFSET), 0x1234);
     }
+
+    #[test]
+    fn window_registers_are_mapped_and_support_byte_writes() {
+        let mut io = IoRegisters::new();
+
+        io.write16(IoRegisters::WIN0H_OFFSET, 0x1234);
+        io.write16(IoRegisters::WIN1V_OFFSET, 0x5678);
+        io.write8(IoRegisters::WININ_OFFSET, 0x3F);
+        io.write8(IoRegisters::WININ_OFFSET + 1, 0x12);
+        io.write16(IoRegisters::WINOUT_OFFSET, 0x3F21);
+
+        assert_eq!(io.read16(IoRegisters::WIN0H_OFFSET), 0x1234);
+        assert_eq!(io.read16(IoRegisters::WIN1V_OFFSET), 0x5678);
+        assert_eq!(io.read16(IoRegisters::WININ_OFFSET), 0x123F);
+        assert_eq!(io.read16(IoRegisters::WINOUT_OFFSET), 0x3F21);
+    }
+
     #[test]
     fn mode0_background_registers_are_mapped() {
         let mut io = IoRegisters::new();

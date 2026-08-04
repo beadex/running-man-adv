@@ -146,6 +146,21 @@ fn run_headless(
         bus.read16(crate::bus::Bus::REG_DISPCNT)
     );
     println!(
+        "  WIN0H/WIN0V:      0x{:04X}/0x{:04X}",
+        bus.read16(crate::bus::Bus::REG_WIN0H),
+        bus.read16(crate::bus::Bus::REG_WIN0V)
+    );
+    println!(
+        "  WIN1H/WIN1V:      0x{:04X}/0x{:04X}",
+        bus.read16(crate::bus::Bus::REG_WIN1H),
+        bus.read16(crate::bus::Bus::REG_WIN1V)
+    );
+    println!(
+        "  WININ/WINOUT:     0x{:04X}/0x{:04X}",
+        bus.read16(crate::bus::Bus::REG_WININ),
+        bus.read16(crate::bus::Bus::REG_WINOUT)
+    );
+    println!(
         "  VCOUNT:           {}",
         bus.read16(crate::bus::Bus::REG_VCOUNT)
     );

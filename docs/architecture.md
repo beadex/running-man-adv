@@ -13,7 +13,8 @@
 > **Status note:** The detailed milestone inventory later in this document is
 > historical and currently lags the implementation. The code now includes ARM
 > and Thumb execution, banked CPU modes, exceptions/IRQ, timers, DMA, PPU
-> timing, video modes 0/1/2/3/4, objects, blending, keypad/HALT, and SDL output.
+> timing, video modes 0/1/2/3/4, objects, blending, WIN0/WIN1 and OBJ-window
+> masking, keypad/HALT, and SDL output.
 > Cartridge save selection by ROM signature and 128 KiB Flash 1M command
 > emulation are also implemented; EEPROM and save-file persistence are not.
 > Keep this note until the full architecture document is rewritten.
@@ -28,9 +29,10 @@ cargo run -- --bios firmware/gba_bios.bin --rom roms/test.gba \
 ```
 
 The final dump includes CPU state, CPSR/mode, interrupt registers, PPU state,
-the BIOS IRQ handler pointer, a stable framebuffer hash, and the optional
-watched memory value. A watched value also reports its number of changes and
-per-bit rising-edge counts during the run.
+the window coordinates and masks (`WIN0H`, `WIN0V`, `WIN1H`, `WIN1V`, `WININ`,
+and `WINOUT`), the BIOS IRQ handler pointer, a stable framebuffer hash, and the
+optional watched memory value. A watched value also reports its number of
+changes and per-bit rising-edge counts during the run.
 
 The final framebuffer can be written as a binary PPM image for visual
 regression checks without starting SDL:
@@ -40,6 +42,25 @@ cargo run --release -- --bios firmware/gba_bios.bin --rom roms/test.gba \
   --headless-cycles 1200000000 --framebuffer-output emerald-title.ppm \
   --strict-cpu
 ```
+
+Deterministic keypad input can be scheduled with repeatable
+`--press-key KEY:START-CYCLE:DURATION-CYCLES` options. For example, this run
+presses Start at the title screen and advances an empty-save Emerald ROM into
+the new-game introduction:
+
+```text
+cargo run --release -- --bios firmware/gba_bios.bin --rom roms/test.gba \
+  --headless-cycles 1800000000 \
+  --press-key START:1150000000:5000000 \
+  --press-key A:1300000000:5000000 \
+  --press-key A:1500000000:5000000 \
+  --press-key A:1650000000:5000000 \
+  --framebuffer-output emerald-new-game.ppm --strict-cpu
+```
+
+Supported key names are `A`, `B`, `SELECT`, `START`, `RIGHT`, `LEFT`, `UP`,
+`DOWN`, `R`, and `L`. Overlapping intervals are combined into one keypad
+pressed mask.
 
 Validation runs can stop at the first CPU decode or execution fault instead of
 logging the error and continuing with corrupted state:

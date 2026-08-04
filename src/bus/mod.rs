@@ -203,6 +203,13 @@ impl Bus {
     pub const REG_BG3HOFS: u32 = IoRegisters::BASE + IoRegisters::BG3HOFS_OFFSET;
     pub const REG_BG3VOFS: u32 = IoRegisters::BASE + IoRegisters::BG3VOFS_OFFSET;
 
+    pub const REG_WIN0H: u32 = IoRegisters::BASE + IoRegisters::WIN0H_OFFSET;
+    pub const REG_WIN1H: u32 = IoRegisters::BASE + IoRegisters::WIN1H_OFFSET;
+    pub const REG_WIN0V: u32 = IoRegisters::BASE + IoRegisters::WIN0V_OFFSET;
+    pub const REG_WIN1V: u32 = IoRegisters::BASE + IoRegisters::WIN1V_OFFSET;
+    pub const REG_WININ: u32 = IoRegisters::BASE + IoRegisters::WININ_OFFSET;
+    pub const REG_WINOUT: u32 = IoRegisters::BASE + IoRegisters::WINOUT_OFFSET;
+
     pub const REG_BLDCNT: u32 = IoRegisters::BASE + IoRegisters::BLDCNT_OFFSET;
     pub const REG_BLDALPHA: u32 = IoRegisters::BASE + IoRegisters::BLDALPHA_OFFSET;
     pub const REG_BLDY: u32 = IoRegisters::BASE + IoRegisters::BLDY_OFFSET;

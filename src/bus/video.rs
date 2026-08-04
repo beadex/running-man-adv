@@ -108,6 +108,18 @@ impl DisplayControl {
         self.raw & Self::OBJ_ENABLE_MASK != 0
     }
 
+    pub const fn window0_enabled(self) -> bool {
+        self.raw & Self::WINDOW0_ENABLE_MASK != 0
+    }
+
+    pub const fn window1_enabled(self) -> bool {
+        self.raw & Self::WINDOW1_ENABLE_MASK != 0
+    }
+
+    pub const fn object_window_enabled(self) -> bool {
+        self.raw & Self::OBJ_WINDOW_ENABLE_MASK != 0
+    }
+
     pub const fn obj_mapping_1d(self) -> bool {
         self.raw & Self::OBJ_MAPPING_1D_MASK != 0
     }
@@ -120,6 +132,75 @@ impl DisplayControl {
 impl Default for DisplayControl {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowRange {
+    start: u8,
+    end: u8,
+}
+
+impl WindowRange {
+    const fn new() -> Self {
+        Self { start: 0, end: 0 }
+    }
+
+    const fn raw(self) -> u16 {
+        ((self.start as u16) << 8) | self.end as u16
+    }
+
+    fn write(&mut self, value: u16) {
+        self.start = (value >> 8) as u8;
+        self.end = value as u8;
+    }
+
+    const fn contains(self, coordinate: u8) -> bool {
+        if self.start <= self.end {
+            coordinate >= self.start && coordinate < self.end
+        } else {
+            coordinate >= self.start || coordinate < self.end
+        }
+    }
+}
+
+impl Default for WindowRange {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowControl {
+    raw: u8,
+}
+
+impl WindowControl {
+    const ALL_ENABLED: Self = Self { raw: 0x3F };
+
+    const fn from_raw(raw: u8) -> Self {
+        Self { raw: raw & 0x3F }
+    }
+
+    const fn raw(self) -> u8 {
+        self.raw
+    }
+
+    const fn layer_enabled(self, layer: PixelLayer) -> bool {
+        let bit = match layer {
+            PixelLayer::Bg0 => 0,
+            PixelLayer::Bg1 => 1,
+            PixelLayer::Bg2 => 2,
+            PixelLayer::Bg3 => 3,
+            PixelLayer::Obj => 4,
+            PixelLayer::Backdrop => return true,
+        };
+
+        self.raw & (1 << bit) != 0
+    }
+
+    const fn effects_enabled(self) -> bool {
+        self.raw & (1 << 5) != 0
     }
 }
 
@@ -676,6 +757,12 @@ pub struct Video {
     bg3: AffineBackground,
     framebuffer: Box<Framebuffer>,
     object_line: Box<[Option<ObjectPixel>; SCREEN_WIDTH]>,
+    object_window_line: Box<[bool; SCREEN_WIDTH]>,
+    window_horizontal: [WindowRange; 2],
+    window_vertical: [WindowRange; 2],
+    window_inside: [WindowControl; 2],
+    window_outside: WindowControl,
+    object_window: WindowControl,
     blend_control: BlendControl,
     blend_alpha: BlendAlpha,
     blend_brightness: BlendBrightness,
@@ -695,6 +782,12 @@ impl Video {
             bg3: AffineBackground::new(),
             framebuffer: Box::new([Self::UNIMPLEMENTED_MODE_PIXEL; FRAMEBUFFER_PIXEL_COUNT]),
             object_line: Box::new([None; SCREEN_WIDTH]),
+            object_window_line: Box::new([false; SCREEN_WIDTH]),
+            window_horizontal: [WindowRange::new(); 2],
+            window_vertical: [WindowRange::new(); 2],
+            window_inside: [WindowControl::from_raw(0); 2],
+            window_outside: WindowControl::from_raw(0),
+            object_window: WindowControl::from_raw(0),
             blend_control: BlendControl::new(),
             blend_alpha: BlendAlpha::new(),
             blend_brightness: BlendBrightness::new(),
@@ -805,6 +898,40 @@ impl Video {
         self.blend_brightness.write(value);
     }
 
+    pub const fn read_window_horizontal(&self, index: usize) -> u16 {
+        self.window_horizontal[index].raw()
+    }
+
+    pub fn write_window_horizontal(&mut self, index: usize, value: u16) {
+        self.window_horizontal[index].write(value);
+    }
+
+    pub const fn read_window_vertical(&self, index: usize) -> u16 {
+        self.window_vertical[index].raw()
+    }
+
+    pub fn write_window_vertical(&mut self, index: usize, value: u16) {
+        self.window_vertical[index].write(value);
+    }
+
+    pub const fn read_window_inside(&self) -> u16 {
+        self.window_inside[0].raw() as u16 | ((self.window_inside[1].raw() as u16) << 8)
+    }
+
+    pub fn write_window_inside(&mut self, value: u16) {
+        self.window_inside[0] = WindowControl::from_raw(value as u8);
+        self.window_inside[1] = WindowControl::from_raw((value >> 8) as u8);
+    }
+
+    pub const fn read_window_outside(&self) -> u16 {
+        self.window_outside.raw() as u16 | ((self.object_window.raw() as u16) << 8)
+    }
+
+    pub fn write_window_outside(&mut self, value: u16) {
+        self.window_outside = WindowControl::from_raw(value as u8);
+        self.object_window = WindowControl::from_raw((value >> 8) as u8);
+    }
+
     pub fn framebuffer(&self) -> &[u32] {
         self.framebuffer.as_slice()
     }
@@ -869,11 +996,16 @@ impl Video {
         self.render_object_scanline(line, vram, palette, oam);
 
         for x in 0..SCREEN_WIDTH {
+            let window = self.window_control_at(x, line);
             let mut candidates = [None; 6];
             let mut count = 0usize;
 
             for background_index in 0..4usize {
-                if !self.display_control.background_enabled(background_index) {
+                let layer = PixelLayer::from_background_index(background_index as u8);
+
+                if !self.display_control.background_enabled(background_index)
+                    || !window.layer_enabled(layer)
+                {
                     continue;
                 }
 
@@ -890,7 +1022,9 @@ impl Video {
                 }
             }
 
-            if let Some(object) = self.object_line[x] {
+            if window.layer_enabled(PixelLayer::Obj)
+                && let Some(object) = self.object_line[x]
+            {
                 candidates[count] = Some(layer_from_object(object));
                 count += 1;
             }
@@ -898,7 +1032,8 @@ impl Video {
             candidates[count] = Some(backdrop_layer(backdrop));
             count += 1;
 
-            self.framebuffer[destination_start + x] = self.compose_layers(&candidates[..count]);
+            self.framebuffer[destination_start + x] =
+                self.compose_layers_with_effects(&candidates[..count], window.effects_enabled());
         }
     }
 
@@ -909,6 +1044,7 @@ impl Video {
         self.render_object_scanline(line, vram, palette, oam);
 
         for x in 0..SCREEN_WIDTH {
+            let window = self.window_control_at(x, line);
             let mut candidates = [None; 5];
             let mut count = 0usize;
 
@@ -917,7 +1053,11 @@ impl Video {
              * affine pipeline; BG3 is unavailable in this mode.
              */
             for background_index in 0..2usize {
-                if !self.display_control.background_enabled(background_index) {
+                let layer = PixelLayer::from_background_index(background_index as u8);
+
+                if !self.display_control.background_enabled(background_index)
+                    || !window.layer_enabled(layer)
+                {
                     continue;
                 }
 
@@ -934,7 +1074,7 @@ impl Video {
                 }
             }
 
-            if self.display_control.bg2_enabled() {
+            if self.display_control.bg2_enabled() && window.layer_enabled(PixelLayer::Bg2) {
                 if let Some(color) = sample_affine_background(&self.bg2, x, vram, palette) {
                     candidates[count] = Some(LayerPixel {
                         color,
@@ -946,7 +1086,9 @@ impl Video {
                 }
             }
 
-            if let Some(object) = self.object_line[x] {
+            if window.layer_enabled(PixelLayer::Obj)
+                && let Some(object) = self.object_line[x]
+            {
                 candidates[count] = Some(layer_from_object(object));
                 count += 1;
             }
@@ -954,7 +1096,8 @@ impl Video {
             candidates[count] = Some(backdrop_layer(backdrop));
             count += 1;
 
-            self.framebuffer[destination_start + x] = self.compose_layers(&candidates[..count]);
+            self.framebuffer[destination_start + x] =
+                self.compose_layers_with_effects(&candidates[..count], window.effects_enabled());
         }
     }
 
@@ -965,10 +1108,11 @@ impl Video {
         self.render_object_scanline(line, vram, palette, oam);
 
         for x in 0..SCREEN_WIDTH {
+            let window = self.window_control_at(x, line);
             let mut candidates = [None; 4];
             let mut count = 0usize;
 
-            if self.display_control.bg2_enabled() {
+            if self.display_control.bg2_enabled() && window.layer_enabled(PixelLayer::Bg2) {
                 if let Some(color) = sample_affine_background(&self.bg2, x, vram, palette) {
                     candidates[count] = Some(LayerPixel {
                         color,
@@ -980,7 +1124,7 @@ impl Video {
                 }
             }
 
-            if self.display_control.bg3_enabled() {
+            if self.display_control.bg3_enabled() && window.layer_enabled(PixelLayer::Bg3) {
                 if let Some(color) = sample_affine_background(&self.bg3, x, vram, palette) {
                     candidates[count] = Some(LayerPixel {
                         color,
@@ -992,7 +1136,9 @@ impl Video {
                 }
             }
 
-            if let Some(object) = self.object_line[x] {
+            if window.layer_enabled(PixelLayer::Obj)
+                && let Some(object) = self.object_line[x]
+            {
                 candidates[count] = Some(layer_from_object(object));
                 count += 1;
             }
@@ -1000,7 +1146,8 @@ impl Video {
             candidates[count] = Some(backdrop_layer(backdrop));
             count += 1;
 
-            self.framebuffer[destination_start + x] = self.compose_layers(&candidates[..count]);
+            self.framebuffer[destination_start + x] =
+                self.compose_layers_with_effects(&candidates[..count], window.effects_enabled());
         }
     }
 
@@ -1056,6 +1203,7 @@ impl Video {
         self.render_object_scanline(line, vram, palette, oam);
 
         for x in 0..SCREEN_WIDTH {
+            let window = self.window_control_at(x, line);
             let source_offset = source_line_start + x * 2;
             let low = vram.get(source_offset).copied().unwrap_or(0);
             let high = vram.get(source_offset + 1).copied().unwrap_or(0);
@@ -1063,15 +1211,19 @@ impl Video {
             let mut candidates = [None; 3];
             let mut count = 0usize;
 
-            candidates[count] = Some(LayerPixel {
-                color: bgr555_to_rgba8888(u16::from_le_bytes([low, high])),
-                priority: bg_priority,
-                layer: PixelLayer::Bg2,
-                semi_transparent: false,
-            });
-            count += 1;
+            if window.layer_enabled(PixelLayer::Bg2) {
+                candidates[count] = Some(LayerPixel {
+                    color: bgr555_to_rgba8888(u16::from_le_bytes([low, high])),
+                    priority: bg_priority,
+                    layer: PixelLayer::Bg2,
+                    semi_transparent: false,
+                });
+                count += 1;
+            }
 
-            if let Some(object) = self.object_line[x] {
+            if window.layer_enabled(PixelLayer::Obj)
+                && let Some(object) = self.object_line[x]
+            {
                 candidates[count] = Some(layer_from_object(object));
                 count += 1;
             }
@@ -1080,7 +1232,7 @@ impl Video {
             count += 1;
 
             self.framebuffer[destination_line_start + x] =
-                self.compose_layers(&candidates[..count]);
+                self.compose_layers_with_effects(&candidates[..count], window.effects_enabled());
         }
     }
 
@@ -1099,10 +1251,11 @@ impl Video {
         self.render_object_scanline(line, vram, palette, oam);
 
         for x in 0..SCREEN_WIDTH {
+            let window = self.window_control_at(x, line);
             let mut candidates = [None; 3];
             let mut count = 0usize;
 
-            if self.display_control.bg2_enabled() {
+            if self.display_control.bg2_enabled() && window.layer_enabled(PixelLayer::Bg2) {
                 let palette_index = vram.get(source_line_start + x).copied().unwrap_or(0);
                 candidates[count] = Some(LayerPixel {
                     color: read_palette_color(palette, palette_index),
@@ -1113,7 +1266,9 @@ impl Video {
                 count += 1;
             }
 
-            if let Some(object) = self.object_line[x] {
+            if window.layer_enabled(PixelLayer::Obj)
+                && let Some(object) = self.object_line[x]
+            {
                 candidates[count] = Some(layer_from_object(object));
                 count += 1;
             }
@@ -1122,14 +1277,15 @@ impl Video {
             count += 1;
 
             self.framebuffer[destination_line_start + x] =
-                self.compose_layers(&candidates[..count]);
+                self.compose_layers_with_effects(&candidates[..count], window.effects_enabled());
         }
     }
 
     fn render_object_scanline(&mut self, line: usize, vram: &[u8], palette: &[u8], oam: &[u8]) {
         self.object_line.fill(None);
+        self.object_window_line.fill(false);
 
-        if !self.display_control.obj_enabled() {
+        if !self.display_control.obj_enabled() && !self.display_control.object_window_enabled() {
             return;
         }
 
@@ -1142,7 +1298,17 @@ impl Video {
                 continue;
             };
 
-            if attributes.disabled() || attributes.shape() == 3 || attributes.object_mode() >= 2 {
+            let object_mode = attributes.object_mode();
+
+            if attributes.disabled() || attributes.shape() == 3 || object_mode == 3 {
+                continue;
+            }
+
+            if object_mode == 2 && !self.display_control.object_window_enabled() {
+                continue;
+            }
+
+            if object_mode != 2 && !self.display_control.obj_enabled() {
                 continue;
             }
 
@@ -1217,17 +1383,30 @@ impl Video {
                     continue;
                 };
 
+                if object_mode == 2 {
+                    self.object_window_line[screen_x] = true;
+                    continue;
+                }
+
                 self.object_line[screen_x] = Some(ObjectPixel {
                     color,
                     priority: attributes.priority(),
                     oam_index: object_index as u8,
-                    semi_transparent: attributes.object_mode() == 1,
+                    semi_transparent: object_mode == 1,
                 });
             }
         }
     }
 
     fn compose_layers(&self, candidates: &[Option<LayerPixel>]) -> u32 {
+        self.compose_layers_with_effects(candidates, true)
+    }
+
+    fn compose_layers_with_effects(
+        &self,
+        candidates: &[Option<LayerPixel>],
+        effects_enabled: bool,
+    ) -> u32 {
         let mut top: Option<LayerPixel> = None;
 
         for candidate in candidates.iter().flatten().copied() {
@@ -1243,7 +1422,7 @@ impl Video {
          * of BLDCNT effect mode. The lower pixel still has to be selected as
          * a second target.
          */
-        if top.layer == PixelLayer::Obj && top.semi_transparent {
+        if effects_enabled && top.layer == PixelLayer::Obj && top.semi_transparent {
             if let Some(second) = find_second_target(candidates, top, self.blend_control) {
                 return blend_alpha_rgba(
                     top.color,
@@ -1252,6 +1431,10 @@ impl Video {
                     self.blend_alpha.evb(),
                 );
             }
+        }
+
+        if !effects_enabled {
+            return top.color;
         }
 
         match self.blend_control.effect() {
@@ -1286,6 +1469,39 @@ impl Video {
         top.color
     }
 
+    fn window_control_at(&self, x: usize, y: usize) -> WindowControl {
+        let any_window_enabled = self.display_control.window0_enabled()
+            || self.display_control.window1_enabled()
+            || self.display_control.object_window_enabled();
+
+        if !any_window_enabled {
+            return WindowControl::ALL_ENABLED;
+        }
+
+        let x = x as u8;
+        let y = y as u8;
+
+        if self.display_control.window0_enabled()
+            && self.window_horizontal[0].contains(x)
+            && self.window_vertical[0].contains(y)
+        {
+            return self.window_inside[0];
+        }
+
+        if self.display_control.window1_enabled()
+            && self.window_horizontal[1].contains(x)
+            && self.window_vertical[1].contains(y)
+        {
+            return self.window_inside[1];
+        }
+
+        if self.display_control.object_window_enabled() && self.object_window_line[x as usize] {
+            return self.object_window;
+        }
+
+        self.window_outside
+    }
+
     fn advance_affine_scanline(&mut self) {
         self.bg2.advance_scanline();
         self.bg3.advance_scanline();
@@ -1307,6 +1523,12 @@ impl Video {
         self.bg3.reset();
         self.framebuffer.fill(Self::UNIMPLEMENTED_MODE_PIXEL);
         self.object_line.fill(None);
+        self.object_window_line.fill(false);
+        self.window_horizontal = [WindowRange::new(); 2];
+        self.window_vertical = [WindowRange::new(); 2];
+        self.window_inside = [WindowControl::from_raw(0); 2];
+        self.window_outside = WindowControl::from_raw(0);
+        self.object_window = WindowControl::from_raw(0);
         self.blend_control = BlendControl::new();
         self.blend_alpha = BlendAlpha::new();
         self.blend_brightness = BlendBrightness::new();
@@ -1781,7 +2003,7 @@ pub const fn bgr555_to_rgba8888(color: u16) -> u32 {
 mod tests {
     use super::{
         DisplayControl, LayerPixel, PixelLayer, SCREEN_HEIGHT, SCREEN_WIDTH, Video, VideoMode,
-        bgr555_to_rgba8888,
+        WindowRange, bgr555_to_rgba8888,
     };
 
     fn backdrop_layer(color: u32) -> LayerPixel {
@@ -1798,6 +2020,35 @@ mod tests {
         let mut control = DisplayControl::new();
         control.write(3);
         assert_eq!(control.mode(), VideoMode::Mode3);
+    }
+
+    #[test]
+    fn window_ranges_wrap_when_start_is_after_end() {
+        let mut range = WindowRange::new();
+        range.write((200 << 8) | 20);
+
+        assert!(range.contains(210));
+        assert!(range.contains(10));
+        assert!(!range.contains(100));
+    }
+
+    #[test]
+    fn win0_has_priority_over_win1() {
+        let mut video = Video::new();
+        video.write_display_control((1 << 13) | (1 << 14));
+        video.write_window_horizontal(0, 1);
+        video.write_window_vertical(0, 1);
+        video.write_window_horizontal(1, 2);
+        video.write_window_vertical(1, 1);
+        video.write_window_inside((1 << 0) | ((1 << 1) << 8));
+
+        let overlap = video.window_control_at(0, 0);
+        let win1_only = video.window_control_at(1, 0);
+
+        assert!(overlap.layer_enabled(PixelLayer::Bg0));
+        assert!(!overlap.layer_enabled(PixelLayer::Bg1));
+        assert!(!win1_only.layer_enabled(PixelLayer::Bg0));
+        assert!(win1_only.layer_enabled(PixelLayer::Bg1));
     }
 
     #[test]
@@ -2400,6 +2651,99 @@ mod tests {
 
         video.render_scanline(0, &vram, &palette, &oam);
         assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+    }
+
+    #[test]
+    fn win0_selects_layers_per_pixel() {
+        let mut video = Video::new();
+
+        /* Mode 0, BG0, BG1, and WIN0 enabled. */
+        video.write_display_control((1 << 8) | (1 << 9) | (1 << 13));
+        video.write_background_control(0, 1 << 8);
+        video.write_background_control(1, 2 << 8);
+        video.write_window_horizontal(0, 1);
+        video.write_window_vertical(0, 1);
+
+        /* WIN0 exposes BG1; outside WIN0 exposes BG0. */
+        video.write_window_inside(1 << 1);
+        video.write_window_outside(1 << 0);
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+
+        vram[0x800..0x802].copy_from_slice(&1u16.to_le_bytes());
+        vram[0x1000..0x1002].copy_from_slice(&2u16.to_le_bytes());
+        vram[32..36].fill(0x11);
+        vram[64..68].fill(0x22);
+        palette[2..4].copy_from_slice(&0x001Fu16.to_le_bytes());
+        palette[4..6].copy_from_slice(&0x7C00u16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &[0; 0x400]);
+
+        assert_eq!(video.framebuffer()[0], 0xFF00_00FF);
+        assert_eq!(video.framebuffer()[1], 0xFFFF_0000);
+    }
+
+    #[test]
+    fn window_can_disable_color_effects() {
+        let mut video = Video::new();
+
+        video.write_display_control((1 << 8) | (1 << 13));
+        video.write_background_control(0, 1 << 8);
+        video.write_window_horizontal(0, 1);
+        video.write_window_vertical(0, 1);
+
+        /* BG0 is visible everywhere, but effects are enabled only outside WIN0. */
+        video.write_window_inside(1 << 0);
+        video.write_window_outside((1 << 0) | (1 << 5));
+        video.write_blend_control((1 << 0) | (2 << 6));
+        video.write_blend_brightness(16);
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+
+        vram[0x800..0x802].copy_from_slice(&1u16.to_le_bytes());
+        vram[32..36].fill(0x11);
+        palette[2..4].copy_from_slice(&0x001Fu16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &[0; 0x400]);
+
+        assert_eq!(video.framebuffer()[0], 0xFFFF_0000);
+        assert_eq!(video.framebuffer()[1], 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn object_window_selects_its_window_mask() {
+        let mut video = Video::new();
+
+        /* Normal OBJ rendering is off; OBJ Window remains active. */
+        video.write_display_control((1 << 8) | (1 << 9) | (1 << 15));
+        video.write_background_control(0, 1 << 8);
+        video.write_background_control(1, 2 << 8);
+
+        /* Outside exposes BG0; OBJ Window exposes BG1. */
+        video.write_window_outside((1 << 0) | ((1 << 1) << 8));
+
+        let mut vram = vec![0u8; 0x18000];
+        let mut palette = vec![0u8; 0x400];
+        let mut oam = vec![0u8; 0x400];
+
+        vram[0x800..0x802].copy_from_slice(&1u16.to_le_bytes());
+        vram[0x1000..0x1002].copy_from_slice(&2u16.to_le_bytes());
+        vram[32..36].fill(0x11);
+        vram[64..68].fill(0x22);
+        palette[2..4].copy_from_slice(&0x001Fu16.to_le_bytes());
+        palette[4..6].copy_from_slice(&0x7C00u16.to_le_bytes());
+
+        /* OBJ0 is an 8x8 OBJ-window sprite with one opaque mask texel. */
+        oam[0..2].copy_from_slice(&(2u16 << 10).to_le_bytes());
+        vram[0x10000] = 0x01;
+        palette[0x202..0x204].copy_from_slice(&0x7FFFu16.to_le_bytes());
+
+        video.render_scanline(0, &vram, &palette, &oam);
+
+        assert_eq!(video.framebuffer()[0], 0xFF00_00FF);
+        assert_eq!(video.framebuffer()[1], 0xFFFF_0000);
     }
 
     #[test]
