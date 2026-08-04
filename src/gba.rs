@@ -1,7 +1,7 @@
 use crate::{
     bus::{
-        Bus, BusLoadError, InterruptController, InterruptSource, IoRegisters, Key,
-        PowerStateRequest,
+        Bus, BusLoadError, CartridgeSaveLoadError, CartridgeSaveType, InterruptController,
+        InterruptSource, IoRegisters, Key, PowerStateRequest,
     },
     cpu::{Cpu, CpuState, Registers},
 };
@@ -57,6 +57,26 @@ impl Gba {
     /// Loads the cartridge ROM image.
     pub fn load_rom(&mut self, rom: &[u8]) -> Result<(), BusLoadError> {
         self.bus.load_rom(rom)
+    }
+
+    pub const fn cartridge_save_type(&self) -> CartridgeSaveType {
+        self.bus.cartridge_save_type()
+    }
+
+    pub const fn cartridge_save_data(&self) -> &[u8] {
+        self.bus.cartridge_save_data()
+    }
+
+    pub fn load_cartridge_save(&mut self, data: &[u8]) -> Result<(), CartridgeSaveLoadError> {
+        self.bus.load_cartridge_save(data)
+    }
+
+    pub const fn cartridge_save_dirty(&self) -> bool {
+        self.bus.cartridge_save_dirty()
+    }
+
+    pub fn mark_cartridge_save_clean(&mut self) {
+        self.bus.mark_cartridge_save_clean();
     }
 
     /// Resets mutable machine state while preserving BIOS and ROM.

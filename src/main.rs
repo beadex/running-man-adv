@@ -3,6 +3,7 @@ mod cpu;
 mod frontend;
 mod gba;
 mod loader;
+mod save_file;
 
 use std::{
     env,
@@ -22,7 +23,10 @@ use crate::{
     frontend::sdl,
     gba::Gba,
     loader::{load_bios_file, load_rom_file},
+    save_file::SaveFile,
 };
+
+const SAVE_FLUSH_INTERVAL_CYCLES: u64 = 5 * 16_777_216;
 
 fn main() -> ExitCode {
     match run() {
@@ -64,32 +68,63 @@ fn run() -> Result<()> {
     let mut gba = Gba::with_images(bios.bytes(), rom.bytes())
         .context("failed to initialize the GBA machine")?;
 
+    let save_file = config
+        .save_path
+        .as_ref()
+        .map(|path| SaveFile::new(path.clone()))
+        .unwrap_or_else(|| SaveFile::for_rom(&config.rom_path));
+
+    println!(
+        "Save: {} ({} bytes, {})",
+        save_file.path().display(),
+        gba.cartridge_save_type().size(),
+        gba.cartridge_save_type().name()
+    );
+
+    if save_file.load(&mut gba)? {
+        println!("Loaded save file: {}", save_file.path().display());
+    }
+
     gba.cpu_mut().set_strict_faults(config.strict_cpu);
 
-    if let Some(cycle_budget) = config.headless_cycles {
+    let run_result = if let Some(cycle_budget) = config.headless_cycles {
         run_headless(
-            gba,
+            &mut gba,
             cycle_budget,
             config.watch_address,
             config.framebuffer_output.as_deref(),
             &config.key_presses,
+            &save_file,
         )
         .context("headless run failed")
     } else {
-        sdl::run(gba).context("SDL frontend failed")
+        sdl::run(&mut gba, &save_file).context("SDL frontend failed")
+    };
+
+    let flush_result = save_file.flush_if_dirty(&mut gba);
+
+    if matches!(flush_result, Ok(true)) {
+        println!("Wrote save file: {}", save_file.path().display());
     }
+
+    run_result?;
+    flush_result?;
+
+    Ok(())
 }
 
 fn run_headless(
-    mut gba: Gba,
+    gba: &mut Gba,
     cycle_budget: u64,
     watch_address: Option<u32>,
     framebuffer_output: Option<&Path>,
     key_presses: &[KeyPress],
+    save_file: &SaveFile,
 ) -> Result<()> {
     let starting_cycles = gba.elapsed_cycles();
     let mut watch_stats = watch_address.map(|address| WatchStats::new(gba.bus().read32(address)));
     let mut pressed_keys = u16::MAX;
+    let mut next_save_flush = SAVE_FLUSH_INTERVAL_CYCLES;
 
     while gba.elapsed_cycles().wrapping_sub(starting_cycles) < cycle_budget {
         let elapsed = gba.elapsed_cycles().wrapping_sub(starting_cycles);
@@ -108,6 +143,14 @@ fn run_headless(
 
         if cycles == 0 {
             break;
+        }
+
+        if elapsed >= next_save_flush {
+            save_file.flush_if_dirty(gba)?;
+
+            while next_save_flush <= elapsed {
+                next_save_flush = next_save_flush.saturating_add(SAVE_FLUSH_INTERVAL_CYCLES);
+            }
         }
     }
 
@@ -309,6 +352,7 @@ struct Config {
     headless_cycles: Option<u64>,
     watch_address: Option<u32>,
     framebuffer_output: Option<PathBuf>,
+    save_path: Option<PathBuf>,
     key_presses: Vec<KeyPress>,
     strict_cpu: bool,
 }
@@ -326,6 +370,7 @@ impl Config {
         let mut headless_cycles = None;
         let mut watch_address = None;
         let mut framebuffer_output = None;
+        let mut save_path = None;
         let mut key_presses = Vec::new();
         let mut strict_cpu = false;
 
@@ -377,6 +422,14 @@ impl Config {
                     })?;
 
                     framebuffer_output = Some(PathBuf::from(value));
+                }
+
+                Some("--save") => {
+                    let value = args
+                        .next()
+                        .ok_or(CliError::MissingOptionValue { option: "--save" })?;
+
+                    save_path = Some(PathBuf::from(value));
                 }
 
                 Some("--press-key") => {
@@ -433,6 +486,7 @@ impl Config {
             headless_cycles,
             watch_address,
             framebuffer_output,
+            save_path,
             key_presses,
             strict_cpu,
         })
@@ -614,6 +668,7 @@ Usage:
 Options:
   --bios <path>    Path to a legally dumped 16 KiB GBA BIOS
   --rom <path>     Path to a GBA ROM image
+  --save <path>    Save file path (default: ROM path with .sav extension)
   --headless-cycles <count>
                     Run without SDL for a fixed CPU-cycle budget
   --watch-address <address>
@@ -719,6 +774,8 @@ mod tests {
                 "0x030022DC",
                 "--framebuffer-output",
                 "frame.ppm",
+                "--save",
+                "custom.sav",
                 "--press-key",
                 "START:1200000000:1000000",
                 "--strict-cpu",
@@ -730,6 +787,7 @@ mod tests {
         assert_eq!(config.headless_cycles, Some(1_000_000));
         assert_eq!(config.watch_address, Some(0x0300_22DC));
         assert_eq!(config.framebuffer_output, Some(PathBuf::from("frame.ppm")));
+        assert_eq!(config.save_path, Some(PathBuf::from("custom.sav")));
         assert_eq!(config.key_presses.len(), 1);
         assert!(config.strict_cpu);
     }

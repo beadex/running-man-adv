@@ -38,6 +38,8 @@ pub use self::video::{
 
 pub use self::waitstate::{AccessKind, AccessWidth, MemoryRegion, TimedAccess, WaitControl};
 
+pub use self::cartridge_save::{CartridgeSaveLoadError, CartridgeSaveType};
+
 use self::cartridge_save::CartridgeSave;
 
 pub(crate) const GAME_PAK_ROM_MAX_SIZE: usize = 32 * 1024 * 1024;
@@ -298,6 +300,26 @@ impl Bus {
         self.cartridge_save = CartridgeSave::from_rom(rom);
 
         Ok(())
+    }
+
+    pub const fn cartridge_save_type(&self) -> CartridgeSaveType {
+        self.cartridge_save.save_type()
+    }
+
+    pub const fn cartridge_save_data(&self) -> &[u8] {
+        self.cartridge_save.data()
+    }
+
+    pub fn load_cartridge_save(&mut self, data: &[u8]) -> Result<(), CartridgeSaveLoadError> {
+        self.cartridge_save.load_data(data)
+    }
+
+    pub const fn cartridge_save_dirty(&self) -> bool {
+        self.cartridge_save.is_dirty()
+    }
+
+    pub fn mark_cartridge_save_clean(&mut self) {
+        self.cartridge_save.mark_clean();
     }
 
     pub const fn io(&self) -> &IoRegisters {

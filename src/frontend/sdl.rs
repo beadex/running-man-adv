@@ -15,6 +15,7 @@ use sdl3::{
 use crate::{
     bus::{Bus, Key, SCREEN_HEIGHT, SCREEN_WIDTH},
     gba::Gba,
+    save_file::SaveFile,
 };
 
 /*
@@ -23,6 +24,7 @@ use crate::{
  * 2^24 Hz = 16,777,216 cycles per second.
  */
 const GBA_CLOCK_HZ: u64 = 16_777_216;
+const SAVE_FLUSH_INTERVAL_CYCLES: u64 = 5 * GBA_CLOCK_HZ;
 
 /*
  * One GBA frame:
@@ -107,7 +109,7 @@ fn process_events(
     Ok(FrontendAction::Continue)
 }
 
-pub fn run(mut gba: Gba) -> Result<()> {
+pub fn run(gba: &mut Gba, save_file: &SaveFile) -> Result<()> {
     let sdl = sdl3::init().context("failed to initialize SDL3")?;
 
     let video_subsystem = sdl
@@ -166,6 +168,9 @@ pub fn run(mut gba: Gba) -> Result<()> {
     let mut texture_pixels = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * size_of::<u32>()];
 
     let mut paused = false;
+    let mut next_save_flush = gba
+        .elapsed_cycles()
+        .saturating_add(SAVE_FLUSH_INTERVAL_CYCLES);
 
     #[cfg(feature = "cpu-trace")]
     let mut next_debug_cycle = DEBUG_INTERVAL_CYCLES;
@@ -184,7 +189,7 @@ pub fn run(mut gba: Gba) -> Result<()> {
     'running: loop {
         let frame_started = Instant::now();
 
-        if process_events(&mut event_pump, &mut gba, &mut paused)? == FrontendAction::Quit {
+        if process_events(&mut event_pump, gba, &mut paused)? == FrontendAction::Quit {
             break 'running;
         }
 
@@ -215,7 +220,7 @@ pub fn run(mut gba: Gba) -> Result<()> {
 
                 #[cfg(feature = "cpu-trace")]
                 if gba.elapsed_cycles() >= next_debug_cycle {
-                    log_emulator_state(&gba);
+                    log_emulator_state(gba);
 
                     /*
                      * Dùng while thay vì cộng một lần để xử lý trường hợp một step
@@ -241,7 +246,7 @@ pub fn run(mut gba: Gba) -> Result<()> {
              * working toward the next frame.
              */
             if batch_index % 4 == 0 {
-                if process_events(&mut event_pump, &mut gba, &mut paused)? == FrontendAction::Quit {
+                if process_events(&mut event_pump, gba, &mut paused)? == FrontendAction::Quit {
                     break 'running;
                 }
 
@@ -271,6 +276,14 @@ pub fn run(mut gba: Gba) -> Result<()> {
         canvas.copy(&texture, None, None)?;
 
         canvas.present();
+
+        if gba.elapsed_cycles() >= next_save_flush {
+            save_file.flush_if_dirty(gba)?;
+
+            while next_save_flush <= gba.elapsed_cycles() {
+                next_save_flush = next_save_flush.saturating_add(SAVE_FLUSH_INTERVAL_CYCLES);
+            }
+        }
 
         pace_frame(frame_started);
     }

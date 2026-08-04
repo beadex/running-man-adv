@@ -16,7 +16,8 @@
 > timing, video modes 0/1/2/3/4, objects, blending, WIN0/WIN1 and OBJ-window
 > masking, keypad/HALT, and SDL output.
 > Cartridge save selection by ROM signature and 128 KiB Flash 1M command
-> emulation are also implemented; EEPROM and save-file persistence are not.
+> emulation are also implemented. SRAM and Flash 1M data persist to host
+> `.sav` files; EEPROM is not implemented.
 > Keep this note until the full architecture document is rewritten.
 
 ## Headless validation
@@ -69,6 +70,19 @@ logging the error and continuing with corrupted state:
 cargo run -- --bios firmware/gba_bios.bin --rom roms/test.gba \
   --headless-cycles 85000000 --strict-cpu
 ```
+
+Cartridge saves default to the ROM path with a `.sav` extension. A different
+path can be selected for both SDL and headless runs:
+
+```text
+cargo run --release -- --bios firmware/gba_bios.bin --rom roms/test.gba \
+  --save saves/emerald.sav
+```
+
+Existing save files must exactly match the detected backend size (64 KiB SRAM
+or 128 KiB Flash 1M). Dirty saves are flushed every five emulated seconds and
+again when the frontend exits. Writes use a temporary file; Windows keeps the
+previous valid save recoverable until the replacement is installed.
 
 ---
 
@@ -231,8 +245,10 @@ Current bus behavior:
 - `FLASH1M_V` ROM signatures select a banked 128 KiB Flash backend with ID,
   byte-program, sector/chip erase, and bank-select commands.
 - Unknown save signatures currently fall back to 64 KiB SRAM.
-- Non-volatile cartridge data survives an emulated machine reset, but is not
-  yet persisted to a host save file.
+- Non-volatile cartridge data survives reset and is loaded from/flushed to a
+  host `.sav` file. Only persistent byte changes mark the save dirty; Flash
+  command and bank-selection writes alone do not trigger disk writes.
+- Existing save files with the wrong size are rejected before emulation starts.
 - Unmapped reads currently return a placeholder open-bus value.
 - Unmapped writes are currently ignored.
 
