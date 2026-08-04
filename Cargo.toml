@@ -8,7 +8,9 @@ anyhow = "1"
 sdl3 = { version = "0.18.4", features = ["build-from-source"] }
 
 [profile.dev]
-opt-level = 0
+# Keep debug symbols and overflow checks while avoiding an interpreter that is
+# too slow for interactive use during development.
+opt-level = 1
 debug = true
 overflow-checks = true
 

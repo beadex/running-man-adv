@@ -41,6 +41,7 @@ pub use self::waitstate::{AccessKind, AccessWidth, MemoryRegion, TimedAccess, Wa
 pub use self::cartridge_save::{CartridgeSaveLoadError, CartridgeSaveType};
 
 use self::cartridge_save::CartridgeSave;
+use self::memory::{read_u16_le, read_u32_le, write_u16_le, write_u32_le};
 
 pub(crate) const GAME_PAK_ROM_MAX_SIZE: usize = 32 * 1024 * 1024;
 
@@ -64,6 +65,9 @@ const OAM_SIZE: usize = 0x0000_0400;
 
 const ROM_BASE: u32 = 0x0800_0000;
 const ROM_END: u32 = 0x0DFF_FFFF;
+const EEPROM_LARGE_ROM_BASE: u32 = 0x0DFF_FF00;
+const EEPROM_SMALL_ROM_BASE: u32 = 0x0D00_0000;
+const EEPROM_SMALL_ROM_LIMIT: usize = 16 * 1024 * 1024;
 
 const SAVE_BASE: u32 = 0x0E00_0000;
 const SAVE_WINDOW_SIZE: usize = 0x0001_0000;
@@ -306,7 +310,7 @@ impl Bus {
         self.cartridge_save.save_type()
     }
 
-    pub const fn cartridge_save_data(&self) -> &[u8] {
+    pub fn cartridge_save_data(&self) -> &[u8] {
         self.cartridge_save.data()
     }
 
@@ -532,10 +536,50 @@ impl Bus {
     pub fn read16(&self, address: u32) -> u16 {
         let aligned = address & !1;
 
+        if self.is_eeprom_access(aligned) {
+            /* Direct CPU reads do not clock an EEPROM DMA transaction. */
+            return 1;
+        }
+
         if IoRegisters::contains_address(aligned) {
             let offset = IoRegisters::address_to_offset(aligned);
 
             return self.io.read16(offset);
+        }
+
+        let direct = match aligned {
+            BIOS_BASE..=0x0000_3FFF => Some(read_u16_le(
+                self.bios.as_slice(),
+                (aligned - BIOS_BASE) as usize,
+            )),
+            0x0200_0000..=0x02FF_FFFF => Some(read_u16_le(
+                self.ewram.as_slice(),
+                mirror_offset(aligned, EWRAM_BASE, EWRAM_SIZE),
+            )),
+            0x0300_0000..=0x03FF_FFFF => Some(read_u16_le(
+                self.iwram.as_slice(),
+                mirror_offset(aligned, IWRAM_BASE, IWRAM_SIZE),
+            )),
+            0x0500_0000..=0x05FF_FFFF => Some(read_u16_le(
+                self.palette.as_slice(),
+                mirror_offset(aligned, PALETTE_BASE, PALETTE_SIZE),
+            )),
+            0x0600_0000..=0x06FF_FFFF => {
+                Some(read_u16_le(self.vram.as_slice(), vram_offset(aligned)))
+            }
+            0x0700_0000..=0x07FF_FFFF => Some(read_u16_le(
+                self.oam.as_slice(),
+                mirror_offset(aligned, OAM_BASE, OAM_SIZE),
+            )),
+            ROM_BASE..=ROM_END => Some(read_u16_le(
+                self.rom.as_slice(),
+                ((aligned - ROM_BASE) & 0x01FF_FFFF) as usize,
+            )),
+            _ => None,
+        };
+
+        if let Some(value) = direct {
+            return value;
         }
 
         let low = self.read8(aligned);
@@ -553,6 +597,11 @@ impl Bus {
     pub fn write16(&mut self, address: u32, value: u16) {
         let aligned = address & !1;
 
+        if self.is_eeprom_access(aligned) {
+            self.cartridge_save.write_eeprom_bit(value & 1 != 0);
+            return;
+        }
+
         if IoRegisters::contains_address(aligned) {
             let offset = IoRegisters::address_to_offset(aligned);
 
@@ -564,6 +613,18 @@ impl Bus {
         let [low, high] = value.to_le_bytes();
 
         match aligned {
+            0x0200_0000..=0x02FF_FFFF => {
+                let offset = mirror_offset(aligned, EWRAM_BASE, EWRAM_SIZE);
+                write_u16_le(self.ewram.as_mut_slice(), offset, value);
+                return;
+            }
+
+            0x0300_0000..=0x03FF_FFFF => {
+                let offset = mirror_offset(aligned, IWRAM_BASE, IWRAM_SIZE);
+                write_u16_le(self.iwram.as_mut_slice(), offset, value);
+                return;
+            }
+
             0x0500_0000..=0x05FF_FFFF => {
                 let offset = mirror_offset(aligned, PALETTE_BASE, PALETTE_SIZE);
 
@@ -616,6 +677,41 @@ impl Bus {
             return self.io.read32(offset);
         }
 
+        let direct = match aligned {
+            BIOS_BASE..=0x0000_3FFF => Some(read_u32_le(
+                self.bios.as_slice(),
+                (aligned - BIOS_BASE) as usize,
+            )),
+            0x0200_0000..=0x02FF_FFFF => Some(read_u32_le(
+                self.ewram.as_slice(),
+                mirror_offset(aligned, EWRAM_BASE, EWRAM_SIZE),
+            )),
+            0x0300_0000..=0x03FF_FFFF => Some(read_u32_le(
+                self.iwram.as_slice(),
+                mirror_offset(aligned, IWRAM_BASE, IWRAM_SIZE),
+            )),
+            0x0500_0000..=0x05FF_FFFF => Some(read_u32_le(
+                self.palette.as_slice(),
+                mirror_offset(aligned, PALETTE_BASE, PALETTE_SIZE),
+            )),
+            0x0600_0000..=0x06FF_FFFF => {
+                Some(read_u32_le(self.vram.as_slice(), vram_offset(aligned)))
+            }
+            0x0700_0000..=0x07FF_FFFF => Some(read_u32_le(
+                self.oam.as_slice(),
+                mirror_offset(aligned, OAM_BASE, OAM_SIZE),
+            )),
+            ROM_BASE..=ROM_END => Some(read_u32_le(
+                self.rom.as_slice(),
+                ((aligned - ROM_BASE) & 0x01FF_FFFF) as usize,
+            )),
+            _ => None,
+        };
+
+        if let Some(value) = direct {
+            return value;
+        }
+
         let b0 = self.read8(aligned);
 
         let b1 = self.read8(aligned.wrapping_add(1));
@@ -644,11 +740,33 @@ impl Bus {
             return;
         }
 
-        if matches!(aligned, 0x0500_0000..=0x07FF_FFFF) {
-            self.write16(aligned, value as u16);
-            self.write16(aligned.wrapping_add(2), (value >> 16) as u16);
-
-            return;
+        match aligned {
+            0x0200_0000..=0x02FF_FFFF => {
+                let offset = mirror_offset(aligned, EWRAM_BASE, EWRAM_SIZE);
+                write_u32_le(self.ewram.as_mut_slice(), offset, value);
+                return;
+            }
+            0x0300_0000..=0x03FF_FFFF => {
+                let offset = mirror_offset(aligned, IWRAM_BASE, IWRAM_SIZE);
+                write_u32_le(self.iwram.as_mut_slice(), offset, value);
+                return;
+            }
+            0x0500_0000..=0x05FF_FFFF => {
+                let offset = mirror_offset(aligned, PALETTE_BASE, PALETTE_SIZE);
+                write_u32_le(self.palette.as_mut_slice(), offset, value);
+                return;
+            }
+            0x0600_0000..=0x06FF_FFFF => {
+                let offset = vram_offset(aligned);
+                write_u32_le(self.vram.as_mut_slice(), offset, value);
+                return;
+            }
+            0x0700_0000..=0x07FF_FFFF => {
+                let offset = mirror_offset(aligned, OAM_BASE, OAM_SIZE);
+                write_u32_le(self.oam.as_mut_slice(), offset, value);
+                return;
+            }
+            _ => {}
         }
 
         let bytes = value.to_le_bytes();
@@ -683,6 +801,18 @@ impl Bus {
         let offset = ((address - ROM_BASE) & 0x01FF_FFFF) as usize;
 
         self.rom.get(offset).copied().unwrap_or(0)
+    }
+
+    fn is_eeprom_access(&self, address: u32) -> bool {
+        if !self.cartridge_save.is_eeprom() {
+            return false;
+        }
+
+        if self.rom.len() <= EEPROM_SMALL_ROM_LIMIT {
+            (EEPROM_SMALL_ROM_BASE..=ROM_END).contains(&address)
+        } else {
+            (EEPROM_LARGE_ROM_BASE..=ROM_END).contains(&address)
+        }
     }
 
     pub fn tick(&mut self, cycles: u32) {
@@ -740,6 +870,16 @@ impl Bus {
 
         let mut cycles = 0u32;
 
+        let eeprom_dma =
+            request.channel == DmaChannelIndex::Dma3 && request.width == DmaTransferWidth::Halfword;
+        let eeprom_source = eeprom_dma && self.is_eeprom_access(source);
+        let eeprom_destination = eeprom_dma && self.is_eeprom_access(destination);
+
+        if eeprom_source || eeprom_destination {
+            self.cartridge_save
+                .begin_eeprom_dma(request.count, eeprom_destination);
+        }
+
         for transfer_index in 0..request.count {
             /*
              * First transfer unit is non-sequential.
@@ -762,7 +902,14 @@ impl Bus {
 
             match request.width {
                 DmaTransferWidth::Halfword => {
-                    let read = self.read16_timed(source, source_kind);
+                    let read = if eeprom_source {
+                        TimedAccess::new(
+                            self.cartridge_save.read_eeprom_bit() as u16,
+                            self.access_cycles(source, AccessWidth::Halfword, source_kind),
+                        )
+                    } else {
+                        self.read16_timed(source, source_kind)
+                    };
 
                     let write_cycles =
                         self.write16_timed(destination, read.value, destination_kind);
@@ -865,9 +1012,32 @@ fn advance_dma_address(address: u32, width: u32, control: DmaAddressControl) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        AccessKind, Bus, BusLoadError, DmaChannelIndex, InterruptController, InterruptSource, Ppu,
-        SCREEN_WIDTH,
+        AccessKind, Bus, BusLoadError, CartridgeSaveType, DmaChannelIndex, InterruptController,
+        InterruptSource, Ppu, SCREEN_WIDTH,
     };
+
+    fn append_serial_bits(bits: &mut Vec<bool>, value: usize, count: usize) {
+        for shift in (0..count).rev() {
+            bits.push(value & (1 << shift) != 0);
+        }
+    }
+
+    fn write_dma_bit_buffer(bus: &mut Bus, address: u32, bits: &[bool]) {
+        for (index, bit) in bits.iter().copied().enumerate() {
+            bus.write16(address + index as u32 * 2, bit as u16);
+        }
+    }
+
+    fn run_dma3_halfwords(bus: &mut Bus, source: u32, destination: u32, count: u16) {
+        bus.write32(Bus::REG_DMA3SAD, source);
+        bus.write32(Bus::REG_DMA3DAD, destination);
+        bus.write16(Bus::REG_DMA3CNT_L, count);
+        bus.write16(Bus::REG_DMA3CNT_H, 1 << 15);
+
+        let result = bus.run_pending_dma().unwrap();
+        assert_eq!(result.channel, DmaChannelIndex::Dma3);
+        assert_eq!(result.transferred_units, count as u32);
+    }
 
     #[test]
     fn bios_is_loaded_and_read_only() {
@@ -1146,6 +1316,73 @@ mod tests {
          * Enable clears after immediate transfer.
          */
         assert_eq!(bus.read16(Bus::REG_DMA0CNT_H) & (1 << 15), 0);
+    }
+
+    #[test]
+    fn dma3_round_trips_eeprom_serial_data() {
+        const BUFFER: u32 = 0x0200_0100;
+        const READBACK: u32 = 0x0300_0100;
+        const EEPROM: u32 = 0x0D00_0000;
+
+        let mut bus = Bus::new();
+        bus.load_rom(b"header EEPROM_V124 trailer").unwrap();
+
+        let block = 0x2A;
+        let data = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
+        let mut write_command = vec![true, false];
+        append_serial_bits(&mut write_command, block, 6);
+
+        for byte in data {
+            append_serial_bits(&mut write_command, byte as usize, 8);
+        }
+
+        write_command.push(false);
+        assert_eq!(write_command.len(), 73);
+        write_dma_bit_buffer(&mut bus, BUFFER, &write_command);
+        run_dma3_halfwords(&mut bus, BUFFER, EEPROM, 73);
+
+        assert_eq!(bus.cartridge_save_type(), CartridgeSaveType::Eeprom512);
+        assert!(bus.cartridge_save_dirty());
+
+        let mut read_command = vec![true, true];
+        append_serial_bits(&mut read_command, block, 6);
+        read_command.push(false);
+        write_dma_bit_buffer(&mut bus, BUFFER, &read_command);
+        run_dma3_halfwords(&mut bus, BUFFER, EEPROM, 9);
+        run_dma3_halfwords(&mut bus, EEPROM, READBACK, 68);
+
+        assert!((0..4).all(|index| bus.read16(READBACK + index * 2) & 1 == 0));
+
+        let read_bits: Vec<bool> = (4..68)
+            .map(|index| bus.read16(READBACK + index * 2) & 1 != 0)
+            .collect();
+        let decoded: Vec<u8> = read_bits
+            .chunks_exact(8)
+            .map(|bits| {
+                bits.iter()
+                    .fold(0u8, |value, &bit| (value << 1) | bit as u8)
+            })
+            .collect();
+
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn eeprom_address_window_depends_on_physical_rom_size() {
+        const EEPROM_FULL_WINDOW: u32 = 0x0D00_0000;
+        const EEPROM_LARGE_ROM_WINDOW: u32 = 0x0DFF_FF00;
+
+        let mut small_bus = Bus::new();
+        small_bus.load_rom(b"EEPROM_V124").unwrap();
+        assert!(small_bus.is_eeprom_access(EEPROM_FULL_WINDOW));
+
+        let mut large_rom = vec![0; 16 * 1024 * 1024 + 1];
+        large_rom[..11].copy_from_slice(b"EEPROM_V124");
+        let mut large_bus = Bus::new();
+        large_bus.load_rom(&large_rom).unwrap();
+
+        assert!(!large_bus.is_eeprom_access(EEPROM_FULL_WINDOW));
+        assert!(large_bus.is_eeprom_access(EEPROM_LARGE_ROM_WINDOW));
     }
 
     #[test]

@@ -14,6 +14,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -26,7 +27,8 @@ use crate::{
     save_file::SaveFile,
 };
 
-const SAVE_FLUSH_INTERVAL_CYCLES: u64 = 5 * 16_777_216;
+const GBA_CLOCK_HZ: u64 = 16_777_216;
+const SAVE_FLUSH_INTERVAL_CYCLES: u64 = 5 * GBA_CLOCK_HZ;
 
 fn main() -> ExitCode {
     match run() {
@@ -125,6 +127,7 @@ fn run_headless(
     let mut watch_stats = watch_address.map(|address| WatchStats::new(gba.bus().read32(address)));
     let mut pressed_keys = u16::MAX;
     let mut next_save_flush = SAVE_FLUSH_INTERVAL_CYCLES;
+    let benchmark_started = Instant::now();
 
     while gba.elapsed_cycles().wrapping_sub(starting_cycles) < cycle_budget {
         let elapsed = gba.elapsed_cycles().wrapping_sub(starting_cycles);
@@ -155,6 +158,8 @@ fn run_headless(
     }
 
     let consumed = gba.elapsed_cycles().wrapping_sub(starting_cycles);
+    let benchmark_elapsed = benchmark_started.elapsed();
+    let (emulated_mhz, realtime_percent) = performance_metrics(consumed, benchmark_elapsed);
     let registers = gba.registers();
     let cpsr = registers.cpsr();
     let bus = gba.bus();
@@ -162,6 +167,11 @@ fn run_headless(
     println!("Headless run complete:");
     println!("  requested cycles: {cycle_budget}");
     println!("  consumed cycles:  {consumed}");
+    println!(
+        "  host time:        {:.3} s",
+        benchmark_elapsed.as_secs_f64()
+    );
+    println!("  emulation rate:   {emulated_mhz:.3} MHz ({realtime_percent:.1}% realtime)");
     println!("  PC:               0x{:08X}", registers.pc());
     println!("  CPSR:             0x{:08X}", cpsr.raw());
     println!("  CPU state:        {:?}", gba.state());
@@ -246,6 +256,20 @@ fn run_headless(
     }
 
     Ok(())
+}
+
+fn performance_metrics(cycles: u64, elapsed: Duration) -> (f64, f64) {
+    let seconds = elapsed.as_secs_f64();
+
+    if seconds == 0.0 {
+        return (0.0, 0.0);
+    }
+
+    let emulated_hz = cycles as f64 / seconds;
+    (
+        emulated_hz / 1_000_000.0,
+        emulated_hz / GBA_CLOCK_HZ as f64 * 100.0,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -689,7 +713,7 @@ mod tests {
 
     use super::{
         CliError, Config, KeyPress, WatchStats, framebuffer_hash, parse_key_press,
-        scheduled_key_mask, write_framebuffer_ppm,
+        performance_metrics, scheduled_key_mask, write_framebuffer_ppm,
     };
 
     use crate::bus::Key;
@@ -698,6 +722,14 @@ mod tests {
     fn framebuffer_hash_is_stable_and_pixel_sensitive() {
         assert_eq!(framebuffer_hash(&[1, 2, 3]), framebuffer_hash(&[1, 2, 3]));
         assert_ne!(framebuffer_hash(&[1, 2, 3]), framebuffer_hash(&[1, 2, 4]));
+    }
+
+    #[test]
+    fn performance_metrics_report_mhz_and_realtime_percentage() {
+        let (mhz, percentage) = performance_metrics(16_777_216, std::time::Duration::from_secs(1));
+
+        assert!((mhz - 16.777_216).abs() < f64::EPSILON);
+        assert!((percentage - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -135,7 +135,7 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use super::SaveFile;
-    use crate::gba::Gba;
+    use crate::{bus::CartridgeSaveType, gba::Gba};
 
     const SAVE_BASE: u32 = 0x0E00_0000;
 
@@ -153,6 +153,38 @@ mod tests {
         bus.write8(SAVE_BASE + 0x2AAA, 0x55);
         bus.write8(SAVE_BASE + 0x5555, 0xA0);
         bus.write8(SAVE_BASE + offset, value);
+    }
+
+    fn program_eeprom_512(gba: &mut Gba, block: usize, data: [u8; 8]) {
+        const BUFFER: u32 = 0x0200_0100;
+        const EEPROM: u32 = 0x0D00_0000;
+
+        let mut bits = vec![true, false];
+
+        for shift in (0..6).rev() {
+            bits.push(block & (1 << shift) != 0);
+        }
+
+        for byte in data {
+            for shift in (0..8).rev() {
+                bits.push(byte & (1 << shift) != 0);
+            }
+        }
+
+        bits.push(false);
+        assert_eq!(bits.len(), 73);
+
+        let bus = gba.bus_mut();
+
+        for (index, bit) in bits.into_iter().enumerate() {
+            bus.write16(BUFFER + index as u32 * 2, bit as u16);
+        }
+
+        bus.write32(crate::bus::Bus::REG_DMA3SAD, BUFFER);
+        bus.write32(crate::bus::Bus::REG_DMA3DAD, EEPROM);
+        bus.write16(crate::bus::Bus::REG_DMA3CNT_L, 73);
+        bus.write16(crate::bus::Bus::REG_DMA3CNT_H, 1 << 15);
+        bus.run_pending_dma().unwrap();
     }
 
     #[test]
@@ -223,6 +255,30 @@ mod tests {
         second.load_rom(b"SRAM_V110").unwrap();
         assert!(save_file.load(&mut second).unwrap());
         assert_eq!(second.bus().read8(SAVE_BASE + 0x4321), 0x7C);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn detected_eeprom_capacity_round_trips_through_disk() {
+        let path = temporary_save_path("eeprom-round-trip");
+        let save_file = SaveFile::new(path.clone());
+        let mut first = Gba::new();
+        first.load_rom(b"EEPROM_V124").unwrap();
+        program_eeprom_512(&mut first, 0x2A, [0x5A; 8]);
+
+        assert_eq!(first.cartridge_save_type(), CartridgeSaveType::Eeprom512);
+        assert!(save_file.flush_if_dirty(&mut first).unwrap());
+        assert_eq!(fs::metadata(&path).unwrap().len(), 512);
+
+        let mut second = Gba::new();
+        second.load_rom(b"EEPROM_V124").unwrap();
+        assert!(save_file.load(&mut second).unwrap());
+        assert_eq!(second.cartridge_save_type(), CartridgeSaveType::Eeprom512);
+        assert_eq!(
+            &second.cartridge_save_data()[0x2A * 8..0x2A * 8 + 8],
+            [0x5A; 8]
+        );
 
         fs::remove_file(path).unwrap();
     }

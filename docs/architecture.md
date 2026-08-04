@@ -15,9 +15,9 @@
 > and Thumb execution, banked CPU modes, exceptions/IRQ, timers, DMA, PPU
 > timing, video modes 0/1/2/3/4, objects, blending, WIN0/WIN1 and OBJ-window
 > masking, keypad/HALT, and SDL output.
-> Cartridge save selection by ROM signature and 128 KiB Flash 1M command
-> emulation are also implemented. SRAM and Flash 1M data persist to host
-> `.sav` files; EEPROM is not implemented.
+> Cartridge save selection by ROM signature, 128 KiB Flash 1M command
+> emulation, and serial EEPROM over DMA3 are also implemented. SRAM, Flash 1M,
+> and EEPROM data persist to host `.sav` files.
 > Keep this note until the full architecture document is rewritten.
 
 ## Headless validation
@@ -28,6 +28,20 @@ The emulator can run without SDL for deterministic boot diagnostics:
 cargo run -- --bios firmware/gba_bios.bin --rom roms/test.gba \
   --headless-cycles 85000000 --watch-address 0x030022DC
 ```
+
+Headless output includes host elapsed time, emulated MHz, and percentage of
+real GBA speed, so the same command can serve as a repeatable performance
+benchmark. Compare release builds, use the same BIOS/ROM/save/cycle budget,
+and verify that the final framebuffer hash is unchanged:
+
+```text
+cargo run --release -- --bios firmware/gba_bios.bin --rom roms/test.gba \
+  --headless-cycles 120000000 --strict-cpu
+```
+
+Interactive builds display emulation speed and FPS in the SDL window title.
+The development profile uses light optimization for usable iteration speed;
+release builds remain the correct choice for performance measurements.
 
 The final dump includes CPU state, CPSR/mode, interrupt registers, PPU state,
 the window coordinates and masks (`WIN0H`, `WIN0V`, `WIN1H`, `WIN1V`, `WININ`,
@@ -79,10 +93,12 @@ cargo run --release -- --bios firmware/gba_bios.bin --rom roms/test.gba \
   --save saves/emerald.sav
 ```
 
-Existing save files must exactly match the detected backend size (64 KiB SRAM
-or 128 KiB Flash 1M). Dirty saves are flushed every five emulated seconds and
-again when the frontend exits. Writes use a temporary file; Windows keeps the
-previous valid save recoverable until the replacement is installed.
+Existing save files must exactly match a supported backend size: 64 KiB SRAM,
+128 KiB Flash 1M, or 512 B/8 KiB EEPROM. A new EEPROM's capacity is inferred
+from its first recognized DMA3 command length. Dirty saves are flushed every
+five emulated seconds and again when the frontend exits. Writes use a temporary
+file; Windows keeps the previous valid save recoverable until the replacement
+is installed.
 
 ---
 
@@ -229,6 +245,7 @@ It does not yet parse detailed operands or execute instructions.
 | VRAM | `0x06000000-0x06FFFFFF` | 96 KiB with special mirroring |
 | OAM | `0x07000000-0x07FFFFFF` | 1 KiB mirrored |
 | Game Pak ROM | `0x08000000-0x0DFFFFFF` | Up to 32 MiB |
+| EEPROM serial I/O | `0x0D000000-0x0DFFFFFF` | 512 B or 8 KiB through DMA3; window narrows for ROMs over 16 MiB |
 | Cartridge save | `0x0E000000-0x0EFFFFFF` | 64 KiB SRAM or banked 128 KiB Flash 1M |
 
 Current bus behavior:
@@ -244,11 +261,16 @@ Current bus behavior:
 - The three Game Pak ROM windows reference the same ROM image.
 - `FLASH1M_V` ROM signatures select a banked 128 KiB Flash backend with ID,
   byte-program, sector/chip erase, and bank-select commands.
+- `EEPROM_V` ROM signatures select a serial EEPROM backend. DMA3 transfer
+  lengths distinguish 512 B and 8 KiB devices; 64-bit data blocks are sent and
+  received most-significant bit first.
 - Unknown save signatures currently fall back to 64 KiB SRAM.
 - Non-volatile cartridge data survives reset and is loaded from/flushed to a
   host `.sav` file. Only persistent byte changes mark the save dirty; Flash
   command and bank-selection writes alone do not trigger disk writes.
 - Existing save files with the wrong size are rejected before emulation starts.
+- EEPROM write-completion delay is not timed yet; the ready bit becomes
+  available immediately after a complete write command.
 - Unmapped reads currently return a placeholder open-bus value.
 - Unmapped writes are currently ignored.
 
@@ -655,7 +677,8 @@ The emulator does not yet model:
 - Timers.
 - PPU.
 - Audio.
-- EEPROM.
+- Exact EEPROM write-busy timing and cartridge-database overrides for unusual
+  size-detection sequences.
 - Game Pak GPIO.
 - Complete cartridge hardware detection beyond SRAM and `FLASH1M_V`.
 - Dynamic recompilation.

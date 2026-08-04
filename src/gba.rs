@@ -63,7 +63,7 @@ impl Gba {
         self.bus.cartridge_save_type()
     }
 
-    pub const fn cartridge_save_data(&self) -> &[u8] {
+    pub fn cartridge_save_data(&self) -> &[u8] {
         self.bus.cartridge_save_data()
     }
 

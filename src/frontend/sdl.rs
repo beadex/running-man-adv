@@ -49,6 +49,8 @@ const WINDOW_HEIGHT: u32 = SCREEN_HEIGHT as u32 * DEFAULT_SCALE;
 #[cfg(feature = "cpu-trace")]
 const DEBUG_INTERVAL_CYCLES: u64 = 1_000_000;
 
+const SPEED_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrontendAction {
     Continue,
@@ -168,6 +170,10 @@ pub fn run(gba: &mut Gba, save_file: &SaveFile) -> Result<()> {
     let mut texture_pixels = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * size_of::<u32>()];
 
     let mut paused = false;
+    let mut title_paused = false;
+    let mut speed_sample_started = Instant::now();
+    let mut speed_sample_cycles = gba.elapsed_cycles();
+    let mut speed_sample_frames = gba.frame_number();
     let mut next_save_flush = gba
         .elapsed_cycles()
         .saturating_add(SAVE_FLUSH_INTERVAL_CYCLES);
@@ -191,6 +197,14 @@ pub fn run(gba: &mut Gba, save_file: &SaveFile) -> Result<()> {
 
         if process_events(&mut event_pump, gba, &mut paused)? == FrontendAction::Quit {
             break 'running;
+        }
+
+        if paused != title_paused {
+            update_window_title(&mut canvas, paused, None)?;
+            title_paused = paused;
+            speed_sample_started = Instant::now();
+            speed_sample_cycles = gba.elapsed_cycles();
+            speed_sample_frames = gba.frame_number();
         }
 
         if paused {
@@ -276,6 +290,26 @@ pub fn run(gba: &mut Gba, save_file: &SaveFile) -> Result<()> {
         canvas.copy(&texture, None, None)?;
 
         canvas.present();
+
+        let sample_elapsed = speed_sample_started.elapsed();
+
+        if sample_elapsed >= SPEED_SAMPLE_INTERVAL {
+            let seconds = sample_elapsed.as_secs_f64();
+            let elapsed_cycles = gba.elapsed_cycles().wrapping_sub(speed_sample_cycles);
+            let elapsed_frames = gba.frame_number().wrapping_sub(speed_sample_frames);
+            let realtime_percent = elapsed_cycles as f64 / seconds / GBA_CLOCK_HZ as f64 * 100.0;
+            let frames_per_second = elapsed_frames as f64 / seconds;
+
+            update_window_title(
+                &mut canvas,
+                false,
+                Some((realtime_percent, frames_per_second)),
+            )?;
+
+            speed_sample_started = Instant::now();
+            speed_sample_cycles = gba.elapsed_cycles();
+            speed_sample_frames = gba.frame_number();
+        }
 
         if gba.elapsed_cycles() >= next_save_flush {
             save_file.flush_if_dirty(gba)?;
@@ -391,16 +425,22 @@ fn pace_frame(frame_started: Instant) {
     }
 }
 
-fn update_window_title(canvas: &mut sdl3::render::WindowCanvas, paused: bool) -> Result<()> {
+fn update_window_title(
+    canvas: &mut sdl3::render::WindowCanvas,
+    paused: bool,
+    performance: Option<(f64, f64)>,
+) -> Result<()> {
     let title = if paused {
-        "Running Man Advance [Paused]"
+        "Running Man Advance [Paused]".to_owned()
+    } else if let Some((realtime_percent, frames_per_second)) = performance {
+        format!("Running Man Advance - {realtime_percent:.1}% - {frames_per_second:.1} FPS")
     } else {
-        "Running Man Advance"
+        "Running Man Advance".to_owned()
     };
 
     canvas
         .window_mut()
-        .set_title(title)
+        .set_title(&title)
         .context("failed to update SDL window title")?;
 
     Ok(())
