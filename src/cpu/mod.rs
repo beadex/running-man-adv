@@ -25,6 +25,14 @@ pub enum CpuState {
     Thumb,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuFault {
+    pub state: CpuState,
+    pub instruction_address: u32,
+    pub opcode: u32,
+    pub detail: String,
+}
+
 #[derive(Debug)]
 pub struct Cpu {
     registers: Registers,
@@ -37,6 +45,14 @@ pub struct Cpu {
      * Branch, exception and PC writes reset this to false.
      */
     next_fetch_sequential: bool,
+
+    /*
+     * Normal interactive emulation remains permissive while the core is
+     * incomplete. Validation/headless runs can opt into stopping at the
+     * first decode or execution error so the original fault is preserved.
+     */
+    strict_faults: bool,
+    last_fault: Option<CpuFault>,
 }
 
 impl Cpu {
@@ -45,6 +61,8 @@ impl Cpu {
             registers: Registers::new(),
             halted: false,
             next_fetch_sequential: false,
+            strict_faults: false,
+            last_fault: None,
         }
     }
 
@@ -54,6 +72,7 @@ impl Cpu {
         self.registers.cpsr_mut().set_thumb_state(false);
         self.halted = false;
         self.next_fetch_sequential = false;
+        self.last_fault = None;
     }
 
     pub const fn is_halted(&self) -> bool {
@@ -126,7 +145,40 @@ impl Cpu {
         self.next_fetch_sequential = false;
     }
 
+    pub fn set_strict_faults(&mut self, enabled: bool) {
+        self.strict_faults = enabled;
+    }
+
+    pub const fn fault(&self) -> Option<&CpuFault> {
+        self.last_fault.as_ref()
+    }
+
+    fn stop_on_fault(
+        &mut self,
+        state: CpuState,
+        instruction_address: u32,
+        opcode: u32,
+        detail: String,
+    ) -> bool {
+        if !self.strict_faults {
+            return false;
+        }
+
+        self.last_fault = Some(CpuFault {
+            state,
+            instruction_address,
+            opcode,
+            detail,
+        });
+
+        true
+    }
+
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
+        if self.last_fault.is_some() {
+            return 0;
+        }
+
         /*
          * HALT wake-up is separate from IRQ exception acceptance.
          *
@@ -206,6 +258,15 @@ impl Cpu {
             Ok(instruction) => instruction,
 
             Err(error) => {
+                if self.stop_on_fault(
+                    CpuState::Arm,
+                    instruction_address,
+                    raw_instruction,
+                    format!("decode error: {error:?}"),
+                ) {
+                    return 0;
+                }
+
                 println!(
                     "ARM decode error: \
                      PC=0x{instruction_address:08X} \
@@ -226,6 +287,15 @@ impl Cpu {
                 Ok(result) => result,
 
                 Err(arm::ArmExecutionError::UnimplementedInstruction) => {
+                    if self.stop_on_fault(
+                        CpuState::Arm,
+                        instruction_address,
+                        raw_instruction,
+                        format!("instruction not implemented: {instruction:?}"),
+                    ) {
+                        return 0;
+                    }
+
                     println!(
                         "ARM instruction not implemented: \
                      PC=0x{instruction_address:08X} \
@@ -236,6 +306,15 @@ impl Cpu {
                 }
 
                 Err(error) => {
+                    if self.stop_on_fault(
+                        CpuState::Arm,
+                        instruction_address,
+                        raw_instruction,
+                        format!("execution error for {instruction:?}: {error:?}"),
+                    ) {
+                        return 0;
+                    }
+
                     println!(
                         "ARM execution error: \
                      PC=0x{instruction_address:08X} \
@@ -273,6 +352,15 @@ impl Cpu {
             Ok(instruction) => instruction,
 
             Err(error) => {
+                if self.stop_on_fault(
+                    CpuState::Thumb,
+                    instruction_address,
+                    fetch.value as u32,
+                    format!("decode error: {error:?}"),
+                ) {
+                    return 0;
+                }
+
                 #[cfg(feature = "cpu-trace")]
                 eprintln!(
                     "THUMB decode error: \
@@ -296,6 +384,15 @@ impl Cpu {
                 Ok(result) => result,
 
                 Err(error) => {
+                    if self.stop_on_fault(
+                        CpuState::Thumb,
+                        instruction_address,
+                        fetch.value as u32,
+                        format!("execution error for {instruction:?}: {error:?}"),
+                    ) {
+                        return 0;
+                    }
+
                     #[cfg(feature = "cpu-trace")]
                     eprintln!(
                         "THUMB execution error: \
@@ -338,6 +435,28 @@ mod tests {
 
         assert_eq!(cycles, 1);
         assert_eq!(cpu.registers().pc(), 4);
+    }
+
+    #[test]
+    fn strict_mode_stops_at_first_unimplemented_instruction() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+
+        /*
+         * SWP R0, R1, [R2] is decoded but not executed yet.
+         */
+        bus.write32(0x0200_0000, 0xE102_0091);
+
+        cpu.registers_mut().set_pc(0x0200_0000);
+        cpu.set_strict_faults(true);
+
+        assert_eq!(cpu.step(&mut bus), 0);
+
+        let fault = cpu.fault().expect("strict mode must retain the fault");
+
+        assert_eq!(fault.state, CpuState::Arm);
+        assert_eq!(fault.instruction_address, 0x0200_0000);
+        assert_eq!(fault.opcode, 0xE102_0091);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
+mod cartridge_save;
 mod dma;
 mod interrupt;
 mod io;
@@ -37,6 +38,8 @@ pub use self::video::{
 
 pub use self::waitstate::{AccessKind, AccessWidth, MemoryRegion, TimedAccess, WaitControl};
 
+use self::cartridge_save::CartridgeSave;
+
 pub(crate) const GAME_PAK_ROM_MAX_SIZE: usize = 32 * 1024 * 1024;
 
 const BIOS_BASE: u32 = 0x0000_0000;
@@ -60,8 +63,8 @@ const OAM_SIZE: usize = 0x0000_0400;
 const ROM_BASE: u32 = 0x0800_0000;
 const ROM_END: u32 = 0x0DFF_FFFF;
 
-const SRAM_BASE: u32 = 0x0E00_0000;
-const SRAM_SIZE: usize = 0x0001_0000;
+const SAVE_BASE: u32 = 0x0E00_0000;
+const SAVE_WINDOW_SIZE: usize = 0x0001_0000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BusLoadError {
@@ -112,7 +115,7 @@ pub struct Bus {
     oam: Box<[u8; OAM_SIZE]>,
 
     rom: Vec<u8>,
-    sram: Box<[u8; SRAM_SIZE]>,
+    cartridge_save: CartridgeSave,
 }
 
 impl Bus {
@@ -234,7 +237,7 @@ impl Bus {
 
             rom: Vec::new(),
 
-            sram: Box::new([0; SRAM_SIZE]),
+            cartridge_save: CartridgeSave::default(),
         }
     }
 
@@ -245,10 +248,11 @@ impl Bus {
         self.palette.fill(0);
         self.vram.fill(0);
         self.oam.fill(0);
-        self.sram.fill(0);
+        self.cartridge_save.reset_protocol();
 
         /*
-         * BIOS and cartridge ROM are preserved across reset.
+         * BIOS, cartridge ROM and non-volatile cartridge save are preserved
+         * across reset.
          */
     }
 
@@ -284,6 +288,7 @@ impl Bus {
 
         self.rom.clear();
         self.rom.extend_from_slice(rom);
+        self.cartridge_save = CartridgeSave::from_rom(rom);
 
         Ok(())
     }
@@ -405,9 +410,9 @@ impl Bus {
             ROM_BASE..=ROM_END => self.read_rom8(address),
 
             0x0E00_0000..=0x0EFF_FFFF => {
-                let offset = mirror_offset(address, SRAM_BASE, SRAM_SIZE);
+                let offset = mirror_offset(address, SAVE_BASE, SAVE_WINDOW_SIZE);
 
-                self.sram[offset]
+                self.cartridge_save.read8(offset)
             }
 
             _ => 0,
@@ -446,22 +451,31 @@ impl Bus {
             }
 
             0x0500_0000..=0x05FF_FFFF => {
-                let offset = mirror_offset(address, PALETTE_BASE, PALETTE_SIZE);
+                /*
+                 * Palette RAM is connected through a 16-bit bus. Hardware
+                 * replicates an 8-bit write across the addressed halfword.
+                 */
+                let offset = mirror_offset(address, PALETTE_BASE, PALETTE_SIZE) & !1;
 
                 self.palette[offset] = value;
+                self.palette[offset + 1] = value;
             }
 
             0x0600_0000..=0x06FF_FFFF => {
-                let offset = vram_offset(address);
+                /*
+                 * VRAM has the same byte-write replication behavior as
+                 * Palette RAM.
+                 */
+                let offset = vram_offset(address) & !1;
 
                 self.vram[offset] = value;
+                self.vram[offset + 1] = value;
             }
 
-            0x0700_0000..=0x07FF_FFFF => {
-                let offset = mirror_offset(address, OAM_BASE, OAM_SIZE);
-
-                self.oam[offset] = value;
-            }
+            /*
+             * OAM ignores byte writes.
+             */
+            0x0700_0000..=0x07FF_FFFF => {}
 
             /*
              * Game Pak ROM is read-only.
@@ -469,9 +483,9 @@ impl Bus {
             ROM_BASE..=ROM_END => {}
 
             0x0E00_0000..=0x0EFF_FFFF => {
-                let offset = mirror_offset(address, SRAM_BASE, SRAM_SIZE);
+                let offset = mirror_offset(address, SAVE_BASE, SAVE_WINDOW_SIZE);
 
-                self.sram[offset] = value;
+                self.cartridge_save.write8(offset, value);
             }
 
             _ => {}
@@ -520,6 +534,37 @@ impl Bus {
 
         let [low, high] = value.to_le_bytes();
 
+        match aligned {
+            0x0500_0000..=0x05FF_FFFF => {
+                let offset = mirror_offset(aligned, PALETTE_BASE, PALETTE_SIZE);
+
+                self.palette[offset] = low;
+                self.palette[offset + 1] = high;
+
+                return;
+            }
+
+            0x0600_0000..=0x06FF_FFFF => {
+                let offset = vram_offset(aligned);
+
+                self.vram[offset] = low;
+                self.vram[offset + 1] = high;
+
+                return;
+            }
+
+            0x0700_0000..=0x07FF_FFFF => {
+                let offset = mirror_offset(aligned, OAM_BASE, OAM_SIZE);
+
+                self.oam[offset] = low;
+                self.oam[offset + 1] = high;
+
+                return;
+            }
+
+            _ => {}
+        }
+
         self.write8(aligned, low);
 
         self.write8(aligned.wrapping_add(1), high);
@@ -566,6 +611,13 @@ impl Bus {
             let offset = IoRegisters::address_to_offset(aligned);
 
             self.io.write32(offset, value);
+
+            return;
+        }
+
+        if matches!(aligned, 0x0500_0000..=0x07FF_FFFF) {
+            self.write16(aligned, value as u16);
+            self.write16(aligned.wrapping_add(2), (value >> 16) as u16);
 
             return;
         }
@@ -834,6 +886,80 @@ mod tests {
         bus.write32(0x0300_0000, 0x89AB_CDEF);
 
         assert_eq!(bus.read32(0x0300_8000), 0x89AB_CDEF);
+    }
+
+    #[test]
+    fn palette_byte_write_is_replicated_across_halfword() {
+        let mut bus = Bus::new();
+
+        bus.write8(0x0500_0001, 0xAB);
+
+        assert_eq!(bus.read16(0x0500_0000), 0xABAB);
+    }
+
+    #[test]
+    fn vram_byte_write_is_replicated_across_halfword() {
+        let mut bus = Bus::new();
+
+        bus.write8(0x0600_0001, 0xCD);
+
+        assert_eq!(bus.read16(0x0600_0000), 0xCDCD);
+    }
+
+    #[test]
+    fn oam_byte_write_is_ignored() {
+        let mut bus = Bus::new();
+
+        bus.write8(0x0700_0000, 0xFF);
+
+        assert_eq!(bus.read8(0x0700_0000), 0);
+    }
+
+    #[test]
+    fn special_video_memory_halfword_writes_preserve_both_bytes() {
+        let mut bus = Bus::new();
+
+        bus.write16(0x0500_0000, 0x1234);
+        bus.write16(0x0600_0000, 0x5678);
+        bus.write16(0x0700_0000, 0x9ABC);
+
+        assert_eq!(bus.read16(0x0500_0000), 0x1234);
+        assert_eq!(bus.read16(0x0600_0000), 0x5678);
+        assert_eq!(bus.read16(0x0700_0000), 0x9ABC);
+    }
+
+    #[test]
+    fn flash_1m_rom_exposes_id_and_preserves_save_across_reset() {
+        const SAVE: u32 = 0x0E00_0000;
+
+        let mut bus = Bus::new();
+
+        bus.load_rom(b"FLASH1M_V103").unwrap();
+
+        bus.write8(SAVE + 0x5555, 0xAA);
+        bus.write8(SAVE + 0x2AAA, 0x55);
+        bus.write8(SAVE + 0x5555, 0x90);
+
+        assert_eq!(bus.read8(SAVE), 0x62);
+        assert_eq!(bus.read8(SAVE + 1), 0x13);
+
+        bus.write8(SAVE + 0x5555, 0xAA);
+        bus.write8(SAVE + 0x2AAA, 0x55);
+        bus.write8(SAVE + 0x5555, 0xF0);
+
+        bus.write8(SAVE + 0x5555, 0xAA);
+        bus.write8(SAVE + 0x2AAA, 0x55);
+        bus.write8(SAVE + 0x5555, 0xA0);
+        bus.write8(SAVE + 0x1234, 0x5A);
+
+        bus.write8(SAVE + 0x5555, 0xAA);
+        bus.write8(SAVE + 0x2AAA, 0x55);
+        bus.write8(SAVE + 0x5555, 0x90);
+
+        bus.reset();
+
+        assert_eq!(bus.read8(SAVE), 0xFF);
+        assert_eq!(bus.read8(SAVE + 0x1234), 0x5A);
     }
 
     #[test]

@@ -10,6 +10,36 @@
 - Later reuse the CPU semantics for a dynamic recompiler.
 - Use modern graphics APIs such as Vulkan and Direct3D 12 for rendering backends.
 
+> **Status note:** The detailed milestone inventory later in this document is
+> historical and currently lags the implementation. The code now includes ARM
+> and Thumb execution, banked CPU modes, exceptions/IRQ, timers, DMA, PPU
+> timing, video modes 0/2/3/4, objects, blending, keypad/HALT, and SDL output.
+> Cartridge save selection by ROM signature and 128 KiB Flash 1M command
+> emulation are also implemented; EEPROM and save-file persistence are not.
+> Keep this note until the full architecture document is rewritten.
+
+## Headless validation
+
+The emulator can run without SDL for deterministic boot diagnostics:
+
+```text
+cargo run -- --bios firmware/gba_bios.bin --rom roms/test.gba \
+  --headless-cycles 85000000 --watch-address 0x030022DC
+```
+
+The final dump includes CPU state, CPSR/mode, interrupt registers, PPU state,
+the BIOS IRQ handler pointer, a stable framebuffer hash, and the optional
+watched memory value. A watched value also reports its number of changes and
+per-bit rising-edge counts during the run.
+
+Validation runs can stop at the first CPU decode or execution fault instead of
+logging the error and continuing with corrupted state:
+
+```text
+cargo run -- --bios firmware/gba_bios.bin --rom roms/test.gba \
+  --headless-cycles 85000000 --strict-cpu
+```
+
 ---
 
 # 1. Development Strategy
@@ -155,7 +185,7 @@ It does not yet parse detailed operands or execute instructions.
 | VRAM | `0x06000000-0x06FFFFFF` | 96 KiB with special mirroring |
 | OAM | `0x07000000-0x07FFFFFF` | 1 KiB mirrored |
 | Game Pak ROM | `0x08000000-0x0DFFFFFF` | Up to 32 MiB |
-| SRAM | `0x0E000000-0x0EFFFFFF` | 64 KiB currently |
+| Cartridge save | `0x0E000000-0x0EFFFFFF` | 64 KiB SRAM or banked 128 KiB Flash 1M |
 
 Current bus behavior:
 
@@ -168,6 +198,11 @@ Current bus behavior:
 - OAM byte writes are ignored.
 - OAM halfword and word writes are supported.
 - The three Game Pak ROM windows reference the same ROM image.
+- `FLASH1M_V` ROM signatures select a banked 128 KiB Flash backend with ID,
+  byte-program, sector/chip erase, and bank-select commands.
+- Unknown save signatures currently fall back to 64 KiB SRAM.
+- Non-volatile cartridge data survives an emulated machine reset, but is not
+  yet persisted to a host save file.
 - Unmapped reads currently return a placeholder open-bus value.
 - Unmapped writes are currently ignored.
 
@@ -575,9 +610,8 @@ The emulator does not yet model:
 - PPU.
 - Audio.
 - EEPROM.
-- Flash save memory.
 - Game Pak GPIO.
-- Cartridge hardware detection.
+- Complete cartridge hardware detection beyond SRAM and `FLASH1M_V`.
 - Dynamic recompilation.
 
 These limitations are intentional at the current milestone.

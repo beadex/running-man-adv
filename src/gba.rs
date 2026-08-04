@@ -425,6 +425,73 @@ mod tests {
     }
 
     #[test]
+    fn vblank_irq_runs_guest_handler_and_sets_memory_flag() {
+        const APPLICATION: u32 = 0x0200_0000;
+        const HANDLER: u32 = 0x0200_0100;
+        const FLAG: u32 = 0x0300_0100;
+
+        let mut gba = Gba::new();
+        let mut bios = vec![0u8; 0x4000];
+
+        /*
+         * Minimal IRQ vector trampoline:
+         *
+         * 0x18: B   0x20
+         * 0x20: LDR R0, [PC]
+         * 0x24: BX  R0
+         * 0x28: handler address
+         */
+        bios[0x18..0x1C].copy_from_slice(&0xEA00_0000u32.to_le_bytes());
+        bios[0x20..0x24].copy_from_slice(&0xE59F_0000u32.to_le_bytes());
+        bios[0x24..0x28].copy_from_slice(&0xE12F_FF10u32.to_le_bytes());
+        bios[0x28..0x2C].copy_from_slice(&HANDLER.to_le_bytes());
+
+        gba.load_bios(&bios).unwrap();
+
+        /*
+         * Application waits in place while PPU timing reaches VBlank.
+         */
+        gba.bus_mut().write32(APPLICATION, 0xEAFF_FFFE);
+
+        /*
+         * Guest IRQ handler:
+         *
+         * LDR  R0, [PC, #0x18]  ; FLAG
+         * MOV  R1, #1
+         * STR  R1, [R0]
+         * LDR  R0, [PC, #0x10]  ; IF
+         * STRH R1, [R0]         ; acknowledge VBlank
+         * SUBS PC, LR, #4       ; exception return
+         */
+        gba.bus_mut().write32(HANDLER, 0xE59F_0018);
+        gba.bus_mut().write32(HANDLER + 0x04, 0xE3A0_1001);
+        gba.bus_mut().write32(HANDLER + 0x08, 0xE580_1000);
+        gba.bus_mut().write32(HANDLER + 0x0C, 0xE59F_0010);
+        gba.bus_mut().write32(HANDLER + 0x10, 0xE1C0_10B0);
+        gba.bus_mut().write32(HANDLER + 0x14, 0xE25E_F004);
+        gba.bus_mut().write32(HANDLER + 0x20, FLAG);
+        gba.bus_mut().write32(HANDLER + 0x24, Bus::REG_IF);
+
+        gba.registers_mut().cpsr_mut().set_mode(CpuMode::System);
+        gba.registers_mut().cpsr_mut().set_irq_disabled(false);
+        gba.registers_mut().set_pc(APPLICATION);
+
+        gba.bus_mut().write16(Bus::REG_DISPSTAT, 1 << 3);
+        gba.bus_mut()
+            .write16(Bus::REG_IE, InterruptSource::VBlank.mask());
+        gba.bus_mut().write16(Bus::REG_IME, 1);
+
+        gba.run_cycles(250_000);
+
+        assert_eq!(gba.bus().read32(FLAG), 1);
+        assert_eq!(
+            gba.bus().read16(Bus::REG_IF) & InterruptSource::VBlank.mask(),
+            0,
+        );
+        assert_eq!(gba.registers().mode(), CpuMode::System);
+    }
+
+    #[test]
     fn run_steps_returns_consumed_cycles() {
         let mut gba = Gba::new();
 
